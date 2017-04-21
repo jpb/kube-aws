@@ -372,7 +372,12 @@
                 {
                   "Action": "autoscaling:Describe*",
                   "Effect": "Allow",
-                  "Resource": [ "*" ]
+                  "Resource": [ "*" ],
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:ResourceTag/KubernetesCluster": "{{.ClusterName}}"
+                    }
+                  }
                 },
                 {{end}}
                 {{if .ClusterAutoscalerSupport.Enabled}}
@@ -384,7 +389,12 @@
                     "autoscaling:SetDesiredCapacity",
                     "autoscaling:TerminateInstanceInAutoScalingGroup"
                   ],
-                  "Resource": "*"
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:ResourceTag/KubernetesCluster": "{{.ClusterName}}"
+                    }
+                  }
                 },
                 {{end}}
                 {{if .SpotFleet.Enabled}}

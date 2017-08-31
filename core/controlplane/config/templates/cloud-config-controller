@@ -1182,7 +1182,7 @@ write_files:
           -ec \
           'echo decrypting assets
            shopt -s nullglob
-           for encKey in /etc/kubernetes/{ssl,{{ if or (.AssetsConfig.HasAuthTokens) ( and .Experimental.TLSBootstrap.Enabled .AssetsConfig.HasTLSBootstrapToken) }}auth{{end}}}/*.enc; do
+           for encKey in /etc/kubernetes/{ssl,additional-configs,{{ if or (.AssetsConfig.HasAuthTokens) ( and .Experimental.TLSBootstrap.Enabled .AssetsConfig.HasTLSBootstrapToken) }}auth{{end}}}/*.enc; do
              echo decrypting $encKey
              f=$(mktemp $encKey.XXXXXXXX)
              /usr/bin/aws \
@@ -1780,6 +1780,9 @@ write_files:
           {{ end -}}
           {{if .Experimental.Oidc.GroupsClaim}}
           - --oidc-groups-claim={{.Experimental.Oidc.GroupsClaim}}
+          {{ end -}}
+          {{if .Experimental.EncryptionAtRest.Enabled}}
+          - --experimental-encryption-provider-config /etc/kubernetes/additional-configs/encryption-config.yaml
           {{ end -}}
           {{ end -}}
           - --cert-dir=/etc/kubernetes/ssl
@@ -2699,6 +2702,11 @@ write_files:
   - path: /etc/kubernetes/ssl/etcd-trusted-ca.pem
     encoding: gzip+base64
     content: {{.AssetsConfig.EtcdTrustedCA}}
+{{ end }}
+
+{{ if .Experimental.EncryptionAtRest.Enabled }}
+  - path: /etc/kubernetes/additional-configs/encryption-config.yaml{{if .AssetsEncryptionEnabled}}.enc{{end}}
+    content: {{.AssetsConfig.EncryptionConfig}}
 {{ end }}
 
   - path: /etc/kubernetes/controller-kubeconfig.yaml

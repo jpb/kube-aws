@@ -1178,6 +1178,8 @@ addons:
 #   # also enable the rbac plugin in order to limit requests using the bootstrap token to only be able to make
 #   # requests related to certificate provisioning.
 #   # The bootstrap token is automatically generated in ./credentials/kubelet-tls-bootstrap-token.
+#   encryptionAtRest:
+#     enabled: false
 #   tlsBootstrap:
 #     enabled: true
 #   # Enables the Node authorization + node restriction admission controller (requires Kubernetes 1.7.4+)

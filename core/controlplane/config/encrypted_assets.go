@@ -43,6 +43,7 @@ type RawAssetsOnMemory struct {
 	// Other assets.
 	AuthTokens        []byte
 	TLSBootstrapToken []byte
+	EncryptionConfig  []byte
 }
 
 type RawAssetsOnDisk struct {
@@ -66,6 +67,7 @@ type RawAssetsOnDisk struct {
 	// Other assets.
 	AuthTokens        RawCredentialOnDisk
 	TLSBootstrapToken RawCredentialOnDisk
+	EncryptionConfig  RawCredentialOnDisk
 }
 
 type EncryptedAssetsOnDisk struct {
@@ -89,6 +91,7 @@ type EncryptedAssetsOnDisk struct {
 	// Other encrypted assets.
 	AuthTokens        EncryptedCredentialOnDisk
 	TLSBootstrapToken EncryptedCredentialOnDisk
+	EncryptionConfig  EncryptedCredentialOnDisk
 }
 
 type CompactAssets struct {
@@ -112,6 +115,9 @@ type CompactAssets struct {
 	// Encrypted -> gzip -> base64 encoded assets.
 	AuthTokens        string
 	TLSBootstrapToken string
+
+	// Encrypted -> base64 encoded EncryptionConfig.
+	EncryptionConfig string
 }
 
 func (c *Cluster) NewTLSCA() (*rsa.PrivateKey, *x509.Certificate, error) {
@@ -243,7 +249,12 @@ func (c *Cluster) NewAssetsOnMemory(caKey *rsa.PrivateKey, caCert *x509.Certific
 
 	authTokens := ""
 
-	tlsBootstrapToken, err := RandomTLSBootstrapTokenString()
+	tlsBootstrapToken, err := RandomTokenString()
+	if err != nil {
+		return nil, err
+	}
+
+	encryptionConfig, err := EncryptionConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -264,12 +275,18 @@ func (c *Cluster) NewAssetsOnMemory(caKey *rsa.PrivateKey, caCert *x509.Certific
 
 		AuthTokens:        []byte(authTokens),
 		TLSBootstrapToken: []byte(tlsBootstrapToken),
+		EncryptionConfig:  []byte(encryptionConfig),
 	}, nil
 }
 
 func ReadRawAssets(dirname string, manageCertificates bool) (*RawAssetsOnDisk, error) {
 	defaultTokensFile := ""
-	defaultTLSBootstrapToken, err := RandomTLSBootstrapTokenString()
+	defaultTLSBootstrapToken, err := RandomTokenString()
+	if err != nil {
+		return nil, err
+	}
+
+	defaultEncryptionConfig, err := EncryptionConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +303,7 @@ func ReadRawAssets(dirname string, manageCertificates bool) (*RawAssetsOnDisk, e
 	files := []entry{
 		{"tokens.csv", &r.AuthTokens, &defaultTokensFile},
 		{"kubelet-tls-bootstrap-token", &r.TLSBootstrapToken, &defaultTLSBootstrapToken},
+		{"encryption-config.yaml", &r.EncryptionConfig, &defaultEncryptionConfig},
 	}
 
 	if manageCertificates {
@@ -324,7 +342,12 @@ func ReadRawAssets(dirname string, manageCertificates bool) (*RawAssetsOnDisk, e
 
 func ReadOrEncryptAssets(dirname string, manageCertificates bool, encryptor CachedEncryptor) (*EncryptedAssetsOnDisk, error) {
 	defaultTokensFile := ""
-	defaultTLSBootstrapToken, err := RandomTLSBootstrapTokenString()
+	defaultTLSBootstrapToken, err := RandomTokenString()
+	if err != nil {
+		return nil, err
+	}
+
+	defaultEncryptionConfig, err := EncryptionConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +364,7 @@ func ReadOrEncryptAssets(dirname string, manageCertificates bool, encryptor Cach
 	files := []entry{
 		{"tokens.csv", &r.AuthTokens, &defaultTokensFile, true},
 		{"kubelet-tls-bootstrap-token", &r.TLSBootstrapToken, &defaultTLSBootstrapToken, true},
+		{"encryption-config.yaml", &r.EncryptionConfig, &defaultEncryptionConfig, true},
 	}
 
 	if manageCertificates {
@@ -412,6 +436,7 @@ func (r *RawAssetsOnMemory) WriteToDir(dirname string, includeCAKey bool) error 
 		// Content entirely provided by user, so do not overwrite it if
 		// the file already exists
 		{"tokens.csv", r.AuthTokens, false},
+		{"encryption-config.yaml", r.EncryptionConfig, false},
 	}
 
 	if includeCAKey {
@@ -494,6 +519,7 @@ func (r *EncryptedAssetsOnDisk) WriteToDir(dirname string) error {
 
 		{"tokens.csv", r.AuthTokens},
 		{"kubelet-tls-bootstrap-token", r.TLSBootstrapToken},
+		{"encryption-config.yaml", r.EncryptionConfig},
 	}
 	for _, asset := range assets {
 		if asset.name != "ca-key.pem" {
@@ -541,6 +567,7 @@ func (r *RawAssetsOnDisk) Compact() (*CompactAssets, error) {
 
 		AuthTokens:        compact(r.AuthTokens),
 		TLSBootstrapToken: compact(r.TLSBootstrapToken),
+		EncryptionConfig:  compact(r.EncryptionConfig),
 	}
 	if err != nil {
 		return nil, err
@@ -585,6 +612,7 @@ func (r *EncryptedAssetsOnDisk) Compact() (*CompactAssets, error) {
 
 		AuthTokens:        compact(r.AuthTokens),
 		TLSBootstrapToken: compact(r.TLSBootstrapToken),
+		EncryptionConfig:  compact(r.EncryptionConfig),
 	}
 	if err != nil {
 		return nil, err
@@ -651,13 +679,35 @@ func ReadOrCreateUnencryptedCompactAssets(assetsDir string, manageCertificates b
 	return compactAssets, nil
 }
 
-func RandomTLSBootstrapTokenString() (string, error) {
+func RandomTokenString() (string, error) {
 	b := make([]byte, 256)
 	_, err := rand.Read(b)
 	if err != nil {
 		return "", err
 	}
-	return base64.URLEncoding.EncodeToString(b), nil
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+func EncryptionConfig() (string, error) {
+	secret, err := RandomTokenString()
+	if err != nil {
+		return "", err
+	}
+	config := `kind: EncryptionConfig
+apiVersion: v1
+resources:
+  - resources:
+    - secrets
+    providers:
+    - aescbc:
+        keys:
+        - name: default
+          secret: %s
+        {{- end}}
+    - identity: {}
+`
+
+	return fmt.Sprintf(config, secret), nil
 }
 
 func (a *CompactAssets) HasAuthTokens() bool {

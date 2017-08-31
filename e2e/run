@@ -269,6 +269,12 @@ experimental:
   auditLog:
     enabled: true" >> cluster.yaml
 
+  if [ "${ENCRYPTION_AT_REST}" != "" ]; then
+      echo -e "
+  encryptionAtRest:
+    enabled: true" >> cluster.yaml
+  fi
+
   if [ "${NODE_AUTHORIZER}" != "" -o "${TLS_BOOTSTRAP}" != "" ]; then
     echo -e "
   tlsBootstrap:
@@ -280,7 +286,6 @@ experimental:
   nodeAuthorizer:
     enabled: true" >> cluster.yaml
   fi
-
 
   if [ "${RBAC}" != "" ]; then
     echo -e "

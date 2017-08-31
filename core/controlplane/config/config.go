@@ -63,6 +63,9 @@ func NewDefaultCluster() *Cluster {
 		AwsNodeLabels: AwsNodeLabels{
 			Enabled: false,
 		},
+		EncryptionAtRest: EncryptionAtRest{
+			Enabled: false,
+		},
 		ClusterAutoscalerSupport: model.ClusterAutoscalerSupport{
 			Enabled: false,
 		},
@@ -524,11 +527,12 @@ type Cluster struct {
 }
 
 type Experimental struct {
-	Admission      Admission      `yaml:"admission"`
-	AuditLog       AuditLog       `yaml:"auditLog"`
-	Authentication Authentication `yaml:"authentication"`
-	AwsEnvironment AwsEnvironment `yaml:"awsEnvironment"`
-	AwsNodeLabels  AwsNodeLabels  `yaml:"awsNodeLabels"`
+	Admission        Admission        `yaml:"admission"`
+	AuditLog         AuditLog         `yaml:"auditLog"`
+	Authentication   Authentication   `yaml:"authentication"`
+	AwsEnvironment   AwsEnvironment   `yaml:"awsEnvironment"`
+	AwsNodeLabels    AwsNodeLabels    `yaml:"awsNodeLabels"`
+	EncryptionAtRest EncryptionAtRest `yaml:"encryptionAtRest"`
 	// When cluster-autoscaler support is enabled, not only controller nodes but this node pool is also given
 	// a node label and IAM permissions to run cluster-autoscaler
 	ClusterAutoscalerSupport    model.ClusterAutoscalerSupport `yaml:"clusterAutoscalerSupport"`
@@ -582,6 +586,10 @@ type AwsEnvironment struct {
 }
 
 type AwsNodeLabels struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type EncryptionAtRest struct {
 	Enabled bool `yaml:"enabled"`
 }
 

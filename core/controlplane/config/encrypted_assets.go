@@ -703,7 +703,6 @@ resources:
         keys:
         - name: default
           secret: %s
-        {{- end}}
     - identity: {}
 `
 

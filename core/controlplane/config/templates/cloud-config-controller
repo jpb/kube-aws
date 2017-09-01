@@ -1781,9 +1781,9 @@ write_files:
           {{if .Experimental.Oidc.GroupsClaim}}
           - --oidc-groups-claim={{.Experimental.Oidc.GroupsClaim}}
           {{ end -}}
+          {{ end -}}
           {{if .Experimental.EncryptionAtRest.Enabled}}
           - --experimental-encryption-provider-config /etc/kubernetes/additional-configs/encryption-config.yaml
-          {{ end -}}
           {{ end -}}
           - --cert-dir=/etc/kubernetes/ssl
           - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem

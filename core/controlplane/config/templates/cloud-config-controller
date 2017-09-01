@@ -1784,7 +1784,7 @@ write_files:
           {{ end -}}
           {{if .Experimental.EncryptionAtRest.Enabled}}
           - --experimental-encryption-provider-config /etc/kubernetes/additional-configs/encryption-config.yaml
-          {{ end -}}
+          {{end}}
           - --cert-dir=/etc/kubernetes/ssl
           - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
           - --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
@@ -1816,6 +1816,11 @@ write_files:
           - mountPath: /etc/ssl/certs
             name: ssl-certs-host
             readOnly: true
+          {{if .Experimental.EncryptionAtRest.Enabled}}
+          - mountPath: /etc/kubernetes/additional-configs
+            name: auth-additional-configs
+            readOnly: true
+          {{end}}
           {{if or (.AssetsConfig.HasAuthTokens) ( and .Experimental.TLSBootstrap.Enabled .AssetsConfig.HasTLSBootstrapToken)}}
           - mountPath: /etc/kubernetes/auth
             name: auth-kubernetes
@@ -1843,6 +1848,11 @@ write_files:
         - hostPath:
             path: /usr/share/ca-certificates
           name: ssl-certs-host
+        {{if .Experimental.EncryptionAtRest.Enabled}}
+        - hostPath:
+            path: /etc/kubernetes/additional-configs
+          name: auth-additional-configs
+        {{end}}
         {{if or (.AssetsConfig.HasAuthTokens) ( and .Experimental.TLSBootstrap.Enabled .AssetsConfig.HasTLSBootstrapToken)}}
         - hostPath:
             path: /etc/kubernetes/auth

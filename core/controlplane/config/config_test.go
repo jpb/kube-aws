@@ -997,7 +997,7 @@ func TestEncryptionAtRestConfig(t *testing.T) {
 		},
 		{
 			conf: `
-experimental:
+kubernetes:
   encryptionAtRest:
     enabled: false
 `,
@@ -1007,7 +1007,7 @@ experimental:
 		},
 		{
 			conf: `
-experimental:
+kubernetes:
   encryptionAtRest:
     enabled: true
 `,
@@ -1034,10 +1034,10 @@ encryptionAtRest:
 			t.Errorf("failed to parse config %s: %v", confBody, err)
 			continue
 		}
-		if !reflect.DeepEqual(c.Experimental.EncryptionAtRest, conf.encryptionAtRest) {
+		if !reflect.DeepEqual(c.Kubernetes.EncryptionAtRest, conf.encryptionAtRest) {
 			t.Errorf(
 				"parsed encryption at rest settings %+v does not match config: %s",
-				c.Experimental.EncryptionAtRest,
+				c.Kubernetes.EncryptionAtRest,
 				confBody,
 			)
 		}

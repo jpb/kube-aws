@@ -101,9 +101,6 @@ func NewDefaultCluster() *Cluster {
 		AwsNodeLabels: AwsNodeLabels{
 			Enabled: false,
 		},
-		EncryptionAtRest: EncryptionAtRest{
-			Enabled: false,
-		},
 		ClusterAutoscalerSupport: model.ClusterAutoscalerSupport{
 			Enabled: true,
 		},
@@ -197,6 +194,9 @@ func NewDefaultCluster() *Cluster {
 				InsecureLogin:   false,
 			},
 			Kubernetes: Kubernetes{
+				EncryptionAtRest: EncryptionAtRest{
+					Enabled: false,
+				},
 				Networking: Networking{
 					SelfHosting: SelfHosting{
 						Enabled:         false,
@@ -588,12 +588,11 @@ type Kubelet struct {
 }
 
 type Experimental struct {
-	Admission        Admission        `yaml:"admission"`
-	AuditLog         AuditLog         `yaml:"auditLog"`
-	Authentication   Authentication   `yaml:"authentication"`
-	AwsEnvironment   AwsEnvironment   `yaml:"awsEnvironment"`
-	AwsNodeLabels    AwsNodeLabels    `yaml:"awsNodeLabels"`
-	EncryptionAtRest EncryptionAtRest `yaml:"encryptionAtRest"`
+	Admission      Admission      `yaml:"admission"`
+	AuditLog       AuditLog       `yaml:"auditLog"`
+	Authentication Authentication `yaml:"authentication"`
+	AwsEnvironment AwsEnvironment `yaml:"awsEnvironment"`
+	AwsNodeLabels  AwsNodeLabels  `yaml:"awsNodeLabels"`
 	// When cluster-autoscaler support is enabled, not only controller nodes but this node pool is also given
 	// a node label and IAM permissions to run cluster-autoscaler
 	ClusterAutoscalerSupport    model.ClusterAutoscalerSupport `yaml:"clusterAutoscalerSupport"`
@@ -748,6 +747,7 @@ type LocalStreaming struct {
 }
 
 type Kubernetes struct {
+	EncryptionAtRest  EncryptionAtRest  `yaml:"encryptionAtRest"`
 	Networking        Networking        `yaml:"networking,omitempty"`
 	ControllerManager ControllerManager `yaml:"controllerManager,omitempty"`
 }

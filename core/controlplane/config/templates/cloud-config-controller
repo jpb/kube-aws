@@ -3223,7 +3223,7 @@ write_files:
           - --oidc-groups-claim={{.Experimental.Oidc.GroupsClaim}}
           {{ end -}}
           {{ end -}}
-          {{if .Experimental.EncryptionAtRest.Enabled}}
+          {{if .Kubernetes.EncryptionAtRest.Enabled}}
           - --experimental-encryption-provider-config /etc/kubernetes/additional-configs/encryption-config.yaml
           {{end}}
           - --cert-dir=/etc/kubernetes/ssl
@@ -3265,7 +3265,7 @@ write_files:
           - mountPath: /etc/ssl/certs
             name: ssl-certs-host
             readOnly: true
-          {{if .Experimental.EncryptionAtRest.Enabled}}
+          {{if .Kubernetes.EncryptionAtRest.Enabled}}
           - mountPath: /etc/kubernetes/additional-configs
             name: auth-additional-configs
             readOnly: true
@@ -3300,7 +3300,7 @@ write_files:
         - hostPath:
             path: /usr/share/ca-certificates
           name: ssl-certs-host
-        {{if .Experimental.EncryptionAtRest.Enabled}}
+        {{if .Kubernetes.EncryptionAtRest.Enabled}}
         - hostPath:
             path: /etc/kubernetes/additional-configs
           name: auth-additional-configs
@@ -4481,7 +4481,7 @@ write_files:
     content: {{.AssetsConfig.ServiceAccountKey}}
 {{ end }}
 
-{{ if .Experimental.EncryptionAtRest.Enabled }}
+{{ if .Kubernetes.EncryptionAtRest.Enabled }}
   - path: /etc/kubernetes/additional-configs/encryption-config.yaml{{if .AssetsEncryptionEnabled}}.enc{{end}}
     content: {{.AssetsConfig.EncryptionConfig}}
 {{ end }}

@@ -539,7 +539,7 @@ func ReadOrEncryptAssets(dirname string, manageCertificates bool, caKeyRequiredO
 	files := []entry{
 		{name: "tokens.csv", data: &r.AuthTokens, defaultValue: &defaultTokensFile, readEncrypted: true, expiryCheck: false},
 		{name: "kubelet-tls-bootstrap-token", data: &r.TLSBootstrapToken, defaultValue: &defaultTLSBootstrapToken, readEncrypted: true, expiryCheck: false},
-		{name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, readEncrypted: true, expiryCHeck: false},
+		{name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, readEncrypted: true, expiryCheck: false},
 	}
 
 	if manageCertificates {

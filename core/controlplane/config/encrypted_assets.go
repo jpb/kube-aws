@@ -358,13 +358,13 @@ func (c *Cluster) NewAssetsOnMemory(caKey *rsa.PrivateKey, caCert *x509.Certific
 		return nil, err
 	}
 
-	encryptionConfig, err := EncryptionConfig()
+	authTokens := ""
+	tlsBootstrapToken, err := RandomTokenString()
 	if err != nil {
 		return nil, err
 	}
 
-  authTokens := ""
-	tlsBootstrapToken, err := RandomTokenString()
+	encryptionConfig, err := EncryptionConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +456,7 @@ func ReadRawAssets(dirname string, manageCertificates bool, caKeyRequiredOnContr
 	files := []entry{
 		{name: "tokens.csv", data: &r.AuthTokens, defaultValue: &defaultTokensFile, expiryCheck: false},
 		{name: "kubelet-tls-bootstrap-token", data: &r.TLSBootstrapToken, defaultValue: &defaultTLSBootstrapToken, expiryCheck: false},
-    {name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, expiryCheck: false},
+		{name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, expiryCheck: false},
 	}
 
 	if manageCertificates {
@@ -539,7 +539,7 @@ func ReadOrEncryptAssets(dirname string, manageCertificates bool, caKeyRequiredO
 	files := []entry{
 		{name: "tokens.csv", data: &r.AuthTokens, defaultValue: &defaultTokensFile, readEncrypted: true, expiryCheck: false},
 		{name: "kubelet-tls-bootstrap-token", data: &r.TLSBootstrapToken, defaultValue: &defaultTLSBootstrapToken, readEncrypted: true, expiryCheck: false},
-    {name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, readEncrypted: true, expiryCHeck: false},
+		{name: "encryption-config.yaml", data: &r.EncryptionConfig, defaultValue: &defaultEncryptionConfig, readEncrypted: true, expiryCHeck: false},
 	}
 
 	if manageCertificates {

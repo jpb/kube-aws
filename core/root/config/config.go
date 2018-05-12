@@ -1,19 +1,16 @@
 package config
 
-//go:generate go run ../../../codegen/templates_gen.go StackTemplateTemplate=stack-template.json
-//go:generate gofmt -w templates.go
-
 import (
 	"errors"
 	"fmt"
 	"io/ioutil"
 
+	"github.com/go-yaml/yaml"
 	controlplane "github.com/kubernetes-incubator/kube-aws/core/controlplane/config"
 	nodepool "github.com/kubernetes-incubator/kube-aws/core/nodepool/config"
 	"github.com/kubernetes-incubator/kube-aws/model"
 	"github.com/kubernetes-incubator/kube-aws/plugin"
 	"github.com/kubernetes-incubator/kube-aws/plugin/pluginmodel"
-	"gopkg.in/yaml.v2"
 )
 
 type UnmarshalledConfig struct {
@@ -144,6 +141,7 @@ func ConfigFromBytes(data []byte, plugins []*pluginmodel.Plugin) (*Config, error
 		{c.Addons, "addons"},
 		{c.Addons.Rescheduler, "addons.rescheduler"},
 		{c.Addons.ClusterAutoscaler, "addons.clusterAutoscaler"},
+		{c.Addons.MetricsServer, "addons.metricsServer"},
 	}
 
 	for i, np := range c.Worker.NodePools {

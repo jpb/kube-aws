@@ -18,9 +18,8 @@ var (
 	}
 
 	validateOpts = struct {
-		awsDebug bool
-		skipWait bool
-		s3URI    string
+		awsDebug, skipWait bool
+		targets            []string
 	}{}
 )
 
@@ -32,16 +31,15 @@ func init() {
 		false,
 		"Log debug information from aws-sdk-go library",
 	)
-	cmdValidate.Flags().StringVar(
-		&validateOpts.s3URI,
-		"s3-uri",
-		"",
-		"When your template is bigger than the cloudformation limit of 51200 bytes, upload the template to the specified location in S3. S3 location expressed as s3://<bucket>/path/to/dir",
-	)
+	cmdValidate.Flags().StringSliceVar(
+		&validateOpts.targets,
+		"targets",
+		root.AllOperationTargetsAsStringSlice(),
+		"Validate nothing but specified sub-stacks. Specify `all` or any combination of `etcd`, `control-plane`, and node pool names. Defaults to `all`")
 }
 
-func runCmdValidate(cmd *cobra.Command, args []string) error {
-	opts := root.NewOptions(validateOpts.s3URI, validateOpts.awsDebug, validateOpts.skipWait)
+func runCmdValidate(_ *cobra.Command, _ []string) error {
+	opts := root.NewOptions(validateOpts.awsDebug, validateOpts.skipWait)
 
 	cluster, err := root.ClusterFromFile(configPath, opts, validateOpts.awsDebug)
 	if err != nil {
@@ -49,7 +47,10 @@ func runCmdValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Validating UserData and stack template...\n")
-	report, err := cluster.ValidateStack()
+
+	targets := root.OperationTargetsFromStringSlice(validateOpts.targets)
+
+	report, err := cluster.ValidateStack(targets)
 	if report != "" {
 		fmt.Fprintf(os.Stderr, "Validation Report: %s\n", report)
 	}

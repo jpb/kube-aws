@@ -1,10 +1,5 @@
 package config
 
-//go:generate go run ../../../codegen/templates_gen.go CloudConfigController=cloud-config-controller CloudConfigWorker=cloud-config-worker CloudConfigEtcd=cloud-config-etcd DefaultClusterConfig=cluster.yaml KubeConfigTemplate=kubeconfig.tmpl StackTemplateTemplate=stack-template.json
-//go:generate gofmt -w templates.go
-//go:generate go run ../../../codegen/files_gen.go Etcdadm=../../../etcdadm/etcdadm
-//go:generate gofmt -w files.go
-
 import (
 	"encoding/json"
 	"errors"
@@ -17,38 +12,81 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Masterminds/semver"
+	"github.com/go-yaml/yaml"
 	"github.com/kubernetes-incubator/kube-aws/cfnresource"
 	"github.com/kubernetes-incubator/kube-aws/coreos/amiregistry"
 	"github.com/kubernetes-incubator/kube-aws/gzipcompressor"
 	"github.com/kubernetes-incubator/kube-aws/model"
 	"github.com/kubernetes-incubator/kube-aws/model/derived"
+	"github.com/kubernetes-incubator/kube-aws/naming"
 	"github.com/kubernetes-incubator/kube-aws/netutil"
 	"github.com/kubernetes-incubator/kube-aws/node"
 	"github.com/kubernetes-incubator/kube-aws/plugin/pluginmodel"
-	yaml "gopkg.in/yaml.v2"
 )
 
 const (
-	k8sVer = "v1.7.4_coreos.0"
+	k8sVer = "v1.9.3"
 
 	credentialsDir = "credentials"
 	userDataDir    = "userdata"
+
+	// Experimental SelfHosting feature default images.
+	kubeNetworkingSelfHostingDefaultCalicoNodeImageTag = "v3.0.6"
+	kubeNetworkingSelfHostingDefaultCalicoCniImageTag  = "v2.0.5"
+	kubeNetworkingSelfHostingDefaultFlannelImageTag    = "v0.9.1"
+	kubeNetworkingSelfHostingDefaultFlannelCniImageTag = "v0.3.0"
+	kubeNetworkingSelfHostingDefaultTyphaImageTag      = "v0.6.4"
+
+	// ControlPlaneStackName is the logical name of a CloudFormation stack resource in a root stack template
+	// This is not needed to be unique in an AWS account because the actual name of a nested stack is generated randomly
+	// by CloudFormation by including the logical name.
+	// This is NOT intended to be used to reference stack name from cloud-config as the target of awscli or cfn-bootstrap-tools commands e.g. `cfn-init` and `cfn-signal`
+	ControlPlaneStackName = "control-plane"
 )
 
 func NewDefaultCluster() *Cluster {
+	kubelet := Kubelet{
+		RotateCerts: RotateCerts{
+			Enabled: false,
+		},
+	}
 	experimental := Experimental{
 		Admission: Admission{
 			PodSecurityPolicy{
 				Enabled: false,
 			},
+			AlwaysPullImages{
+				Enabled: false,
+			},
 			DenyEscalatingExec{
+				Enabled: false,
+			},
+			Initializers{
+				Enabled: false,
+			},
+			Priority{
+				Enabled: false,
+			},
+			MutatingAdmissionWebhook{
+				Enabled: false,
+			},
+			ValidatingAdmissionWebhook{
+				Enabled: false,
+			},
+			OwnerReferencesPermissionEnforcement{
+				Enabled: false,
+			},
+			PersistentVolumeClaimResize{
 				Enabled: false,
 			},
 		},
 		AuditLog: AuditLog{
-			Enabled: false,
-			MaxAge:  30,
-			LogPath: "/var/log/kube-apiserver-audit.log",
+			Enabled:   false,
+			LogPath:   "/var/log/kube-apiserver-audit.log",
+			MaxAge:    30,
+			MaxBackup: 1,
+			MaxSize:   100,
 		},
 		Authentication: Authentication{
 			Webhook{
@@ -67,7 +105,7 @@ func NewDefaultCluster() *Cluster {
 			Enabled: false,
 		},
 		ClusterAutoscalerSupport: model.ClusterAutoscalerSupport{
-			Enabled: false,
+			Enabled: true,
 		},
 		TLSBootstrap: TLSBootstrap{
 			Enabled: false,
@@ -83,6 +121,11 @@ func NewDefaultCluster() *Cluster {
 		Kube2IamSupport: Kube2IamSupport{
 			Enabled: false,
 		},
+		GpuSupport: GpuSupport{
+			Enabled:      false,
+			Version:      "",
+			InstallImage: "shelmangroup/coreos-nvidia-driver-installer:latest",
+		},
 		KubeletOpts: "",
 		LoadBalancer: LoadBalancer{
 			Enabled: false,
@@ -93,11 +136,7 @@ func NewDefaultCluster() *Cluster {
 		NodeDrainer: model.NodeDrainer{
 			Enabled:      false,
 			DrainTimeout: 5,
-		},
-		Plugins: Plugins{
-			Rbac: Rbac{
-				Enabled: false,
-			},
+			IAMRole:      model.IAMRole{},
 		},
 		Oidc: model.Oidc{
 			Enabled:       false,
@@ -106,6 +145,13 @@ func NewDefaultCluster() *Cluster {
 			UsernameClaim: "email",
 			GroupsClaim:   "groups",
 		},
+	}
+
+	ipvsMode := IPVSMode{
+		Enabled:       false,
+		Scheduler:     "rr",
+		SyncPeriod:    "60s",
+		MinSyncPeriod: "10s",
 	}
 
 	return &Cluster{
@@ -117,8 +163,8 @@ func NewDefaultCluster() *Cluster {
 			ContainerRuntime:   "docker",
 			Subnets:            []model.Subnet{},
 			EIPAllocationIDs:   []string{},
-			MapPublicIPs:       true,
 			Experimental:       experimental,
+			Kubelet:            kubelet,
 			ManageCertificates: true,
 			AmazonSsmAgent: AmazonSsmAgent{
 				Enabled:     false,
@@ -134,38 +180,66 @@ func NewDefaultCluster() *Cluster {
 					interval: 60,
 				},
 			},
+			KubeProxy: KubeProxy{
+				IPVSMode: ipvsMode,
+			},
 			KubeDns: KubeDns{
-				NodeLocalResolver: false,
+				NodeLocalResolver:   false,
+				DeployToControllers: false,
+				Autoscaler: KubeDnsAutoscaler{
+					CoresPerReplica: 256,
+					NodesPerReplica: 16,
+					Min:             2,
+				},
+			},
+			KubernetesDashboard: KubernetesDashboard{
+				AdminPrivileges: true,
+				InsecureLogin:   false,
+			},
+			Kubernetes: Kubernetes{
+				Networking: Networking{
+					SelfHosting: SelfHosting{
+						Enabled:         false,
+						Type:            "canal",
+						Typha:           false,
+						CalicoNodeImage: model.Image{Repo: "quay.io/calico/node", Tag: kubeNetworkingSelfHostingDefaultCalicoNodeImageTag, RktPullDocker: false},
+						CalicoCniImage:  model.Image{Repo: "quay.io/calico/cni", Tag: kubeNetworkingSelfHostingDefaultCalicoCniImageTag, RktPullDocker: false},
+						FlannelImage:    model.Image{Repo: "quay.io/coreos/flannel", Tag: kubeNetworkingSelfHostingDefaultFlannelImageTag, RktPullDocker: false},
+						FlannelCniImage: model.Image{Repo: "quay.io/coreos/flannel-cni", Tag: kubeNetworkingSelfHostingDefaultFlannelCniImageTag, RktPullDocker: false},
+						TyphaImage:      model.Image{Repo: "quay.io/calico/typha", Tag: kubeNetworkingSelfHostingDefaultTyphaImageTag, RktPullDocker: false},
+					},
+				},
 			},
 			CloudFormationStreaming:            true,
-			HyperkubeImage:                     model.Image{Repo: "quay.io/coreos/hyperkube", Tag: k8sVer, RktPullDocker: false},
+			HyperkubeImage:                     model.Image{Repo: "k8s.gcr.io/hyperkube-amd64", Tag: k8sVer, RktPullDocker: true},
 			AWSCliImage:                        model.Image{Repo: "quay.io/coreos/awscli", Tag: "master", RktPullDocker: false},
-			CalicoNodeImage:                    model.Image{Repo: "quay.io/calico/node", Tag: "v2.4.1", RktPullDocker: false},
-			CalicoCniImage:                     model.Image{Repo: "quay.io/calico/cni", Tag: "v1.10.0", RktPullDocker: false},
-			CalicoPolicyControllerImage:        model.Image{Repo: "quay.io/calico/kube-policy-controller", Tag: "v0.7.0", RktPullDocker: false},
-			CalicoCtlImage:                     model.Image{Repo: "quay.io/calico/ctl", Tag: "v1.4.0", RktPullDocker: false},
-			ClusterAutoscalerImage:             model.Image{Repo: "gcr.io/google_containers/cluster-autoscaler", Tag: "v0.6.0", RktPullDocker: false},
-			ClusterProportionalAutoscalerImage: model.Image{Repo: "gcr.io/google_containers/cluster-proportional-autoscaler-amd64", Tag: "1.1.2", RktPullDocker: false},
-			Kube2IAMImage:                      model.Image{Repo: "jtblin/kube2iam", Tag: "0.7.0", RktPullDocker: false},
-			KubeDnsImage:                       model.Image{Repo: "gcr.io/google_containers/k8s-dns-kube-dns-amd64", Tag: "1.14.4", RktPullDocker: false},
-			KubeDnsMasqImage:                   model.Image{Repo: "gcr.io/google_containers/k8s-dns-dnsmasq-nanny-amd64", Tag: "1.14.4", RktPullDocker: false},
-			KubeReschedulerImage:               model.Image{Repo: "gcr.io/google-containers/rescheduler", Tag: "v0.3.1", RktPullDocker: false},
-			DnsMasqMetricsImage:                model.Image{Repo: "gcr.io/google_containers/k8s-dns-sidecar-amd64", Tag: "1.14.4", RktPullDocker: false},
-			ExecHealthzImage:                   model.Image{Repo: "gcr.io/google_containers/exechealthz-amd64", Tag: "1.2", RktPullDocker: false},
+			CalicoNodeImage:                    model.Image{Repo: "quay.io/calico/node", Tag: "v2.6.5", RktPullDocker: false},
+			CalicoCniImage:                     model.Image{Repo: "quay.io/calico/cni", Tag: "v1.11.2", RktPullDocker: false},
+			CalicoKubeControllersImage:         model.Image{Repo: "quay.io/calico/kube-controllers", Tag: "v1.0.2", RktPullDocker: false},
+			CalicoCtlImage:                     model.Image{Repo: "quay.io/calico/ctl", Tag: "v1.6.3", RktPullDocker: false},
+			ClusterAutoscalerImage:             model.Image{Repo: "k8s.gcr.io/cluster-autoscaler", Tag: "v1.1.0", RktPullDocker: false},
+			ClusterProportionalAutoscalerImage: model.Image{Repo: "k8s.gcr.io/cluster-proportional-autoscaler-amd64", Tag: "1.1.2", RktPullDocker: false},
+			KIAMImage:                          model.Image{Repo: "quay.io/uswitch/kiam", Tag: "v2.6", RktPullDocker: false},
+			Kube2IAMImage:                      model.Image{Repo: "jtblin/kube2iam", Tag: "0.9.0", RktPullDocker: false},
+			KubeDnsImage:                       model.Image{Repo: "k8s.gcr.io/k8s-dns-kube-dns-amd64", Tag: "1.14.7", RktPullDocker: false},
+			KubeDnsMasqImage:                   model.Image{Repo: "k8s.gcr.io/k8s-dns-dnsmasq-nanny-amd64", Tag: "1.14.7", RktPullDocker: false},
+			KubeReschedulerImage:               model.Image{Repo: "k8s.gcr.io/rescheduler-amd64", Tag: "v0.3.2", RktPullDocker: false},
+			DnsMasqMetricsImage:                model.Image{Repo: "k8s.gcr.io/k8s-dns-sidecar-amd64", Tag: "1.14.7", RktPullDocker: false},
+			ExecHealthzImage:                   model.Image{Repo: "k8s.gcr.io/exechealthz-amd64", Tag: "1.2", RktPullDocker: false},
 			HelmImage:                          model.Image{Repo: "quay.io/kube-aws/helm", Tag: "v2.6.0", RktPullDocker: false},
-			TillerImage:                        model.Image{Repo: "gcr.io/kubernetes-helm/tiller", Tag: "v2.6.0", RktPullDocker: false},
-			HeapsterImage:                      model.Image{Repo: "gcr.io/google_containers/heapster", Tag: "v1.4.1", RktPullDocker: false},
-			AddonResizerImage:                  model.Image{Repo: "gcr.io/google_containers/addon-resizer", Tag: "2.0", RktPullDocker: false},
-			KubeDashboardImage:                 model.Image{Repo: "gcr.io/google_containers/kubernetes-dashboard-amd64", Tag: "v1.6.3", RktPullDocker: false},
-			PauseImage:                         model.Image{Repo: "gcr.io/google_containers/pause-amd64", Tag: "3.0", RktPullDocker: false},
-			FlannelImage:                       model.Image{Repo: "quay.io/coreos/flannel", Tag: "v0.7.1", RktPullDocker: false},
+			TillerImage:                        model.Image{Repo: "gcr.io/kubernetes-helm/tiller", Tag: "v2.7.2", RktPullDocker: false},
+			HeapsterImage:                      model.Image{Repo: "k8s.gcr.io/heapster", Tag: "v1.5.0", RktPullDocker: false},
+			MetricsServerImage:                 model.Image{Repo: "k8s.gcr.io/metrics-server-amd64", Tag: "v0.2.1", RktPullDocker: false},
+			AddonResizerImage:                  model.Image{Repo: "k8s.gcr.io/addon-resizer", Tag: "1.8.1", RktPullDocker: false},
+			KubernetesDashboardImage:           model.Image{Repo: "k8s.gcr.io/kubernetes-dashboard-amd64", Tag: "v1.8.3", RktPullDocker: false},
+			PauseImage:                         model.Image{Repo: "k8s.gcr.io/pause-amd64", Tag: "3.1", RktPullDocker: false},
+			FlannelImage:                       model.Image{Repo: "quay.io/coreos/flannel", Tag: "v0.9.1", RktPullDocker: false},
 			JournaldCloudWatchLogsImage:        model.Image{Repo: "jollinshead/journald-cloudwatch-logs", Tag: "0.1", RktPullDocker: true},
 		},
 		KubeClusterSettings: KubeClusterSettings{
 			DNSServiceIP: "10.3.0.10",
 		},
 		DefaultWorkerSettings: DefaultWorkerSettings{
-			WorkerCount:            0,
 			WorkerCreateTimeout:    "PT15M",
 			WorkerInstanceType:     "t2.medium",
 			WorkerRootVolumeType:   "gp2",
@@ -188,7 +262,6 @@ func NewDefaultCluster() *Cluster {
 		// for base cloudformation stack
 		TLSCADurationDays:           365 * 10,
 		TLSCertDurationDays:         365,
-		CreateRecordSet:             false,
 		RecordSetTTL:                300,
 		SSHAccessAllowedSourceCIDRs: model.DefaultCIDRRanges(),
 		CustomSettings:              make(map[string]interface{}),
@@ -255,28 +328,8 @@ func (c *Cluster) Load() error {
 		return fmt.Errorf("invalid cluster: %v", err)
 	}
 
-	c.SetDefaults()
-
-	if c.ExternalDNSName != "" {
-		// TODO: Deprecate externalDNSName?
-
-		if len(c.APIEndpointConfigs) != 0 {
-			return errors.New("invalid cluster: you can only specify either externalDNSName or apiEndpoints, but not both")
-		}
-
-		subnetRefs := []model.SubnetReference{}
-		for _, s := range c.Controller.LoadBalancer.Subnets {
-			subnetRefs = append(subnetRefs, model.SubnetReference{Name: s.Name})
-		}
-
-		c.APIEndpointConfigs = model.NewDefaultAPIEndpoints(
-			c.ExternalDNSName,
-			subnetRefs,
-			c.HostedZoneID,
-			c.CreateRecordSet,
-			c.RecordSetTTL,
-			c.Controller.LoadBalancer.Private,
-		)
+	if err := c.SetDefaults(); err != nil {
+		return fmt.Errorf("invalid cluster: %v", err)
 	}
 
 	return nil
@@ -295,7 +348,7 @@ func (c *Cluster) ConsumeDeprecatedKeys() {
 	}
 }
 
-func (c *Cluster) SetDefaults() {
+func (c *Cluster) SetDefaults() error {
 	// For backward-compatibility
 	if len(c.Subnets) == 0 {
 		c.Subnets = []model.Subnet{
@@ -303,38 +356,9 @@ func (c *Cluster) SetDefaults() {
 		}
 	}
 
-	privateTopologyImplied := c.RouteTableID != "" && !c.MapPublicIPs
-	publicTopologyImplied := c.RouteTableID != "" && c.MapPublicIPs
-
 	for i, s := range c.Subnets {
 		if s.Name == "" {
 			c.Subnets[i].Name = fmt.Sprintf("Subnet%d", i)
-		}
-
-		// DEPRECATED AND REMOVED IN THE FUTURE
-		// See https://github.com/kubernetes-incubator/kube-aws/pull/284#issuecomment-275998862
-		//
-		// This implies a deployment to an existing VPC with a route table with a preconfigured Internet Gateway
-		// and all the subnets created by kube-aws are public
-		if publicTopologyImplied {
-			c.Subnets[i].RouteTable.ID = c.RouteTableID
-			if s.Private {
-				panic(fmt.Sprintf("mapPublicIPs(=%v) and subnets[%d].private(=%v) conflicts: %+v", c.MapPublicIPs, i, s.Private, s))
-			}
-			c.Subnets[i].Private = false
-		}
-
-		// DEPRECATED AND REMOVED IN THE FUTURE
-		// See https://github.com/kubernetes-incubator/kube-aws/pull/284#issuecomment-275998862
-		//
-		// This implies a deployment to an existing VPC with a route table with a preconfigured NAT Gateway
-		// and all the subnets created by kube-aws are private
-		if privateTopologyImplied {
-			c.Subnets[i].RouteTable.ID = c.RouteTableID
-			if s.Private {
-				panic(fmt.Sprintf("mapPublicIPs(=%v) and subnets[%d].private(=%v) conflicts. You don't need to set true to both of them. If you want to make all the subnets private, make mapPublicIPs false. If you want to make only part of subnets private, make subnets[].private true accordingly: %+v", c.MapPublicIPs, i, s.Private, s))
-			}
-			c.Subnets[i].Private = true
 		}
 	}
 
@@ -354,15 +378,17 @@ func (c *Cluster) SetDefaults() {
 	}
 
 	if len(c.Controller.Subnets) == 0 {
-		if privateTopologyImplied {
-			c.Controller.Subnets = c.PrivateSubnets()
-		} else {
-			c.Controller.Subnets = c.PublicSubnets()
+		c.Controller.Subnets = c.PublicSubnets()
+
+		if len(c.Controller.Subnets) == 0 {
+			return errors.New("`controller.subnets` in cluster.yaml defaults to include only public subnets defined under `subnets`. However, there was no public subnet for that. Please define one or more public subnets under `subnets` or set `controller.subnets`.")
 		}
+	} else if c.Controller.Subnets.ContainsBothPrivateAndPublic() {
+		return errors.New("You can not mix private and public subnets for controller nodes. Please explicitly configure controller.subnets[] to contain either public or private subnets only")
 	}
 
 	if len(c.Controller.LoadBalancer.Subnets) == 0 {
-		if c.Controller.LoadBalancer.Private || privateTopologyImplied {
+		if c.Controller.LoadBalancer.Private {
 			c.Controller.LoadBalancer.Subnets = c.PrivateSubnets()
 			c.Controller.LoadBalancer.Private = true
 		} else {
@@ -371,12 +397,37 @@ func (c *Cluster) SetDefaults() {
 	}
 
 	if len(c.Etcd.Subnets) == 0 {
-		if privateTopologyImplied {
-			c.Etcd.Subnets = c.PrivateSubnets()
-		} else {
-			c.Etcd.Subnets = c.PublicSubnets()
+		c.Etcd.Subnets = c.PublicSubnets()
+
+		if len(c.Etcd.Subnets) == 0 {
+			return errors.New("`etcd.subnets` in cluster.yaml defaults to include only public subnets defined under `subnets`. However, there was no public subnet for that. Please define one or more public subnets under `subnets` or set `etcd.subnets`.")
 		}
+	} else if c.Etcd.Subnets.ContainsBothPrivateAndPublic() {
+		return fmt.Errorf("You can not mix private and public subnets for etcd nodes. Please explicitly configure etcd.subnets[] to contain either public or private subnets only")
 	}
+
+	if c.ExternalDNSName != "" {
+		// TODO: Deprecate externalDNSName?
+
+		if len(c.APIEndpointConfigs) != 0 {
+			return errors.New("invalid cluster: you can only specify either externalDNSName or apiEndpoints, but not both")
+		}
+
+		subnetRefs := []model.SubnetReference{}
+		for _, s := range c.Controller.LoadBalancer.Subnets {
+			subnetRefs = append(subnetRefs, model.SubnetReference{Name: s.Name})
+		}
+
+		c.APIEndpointConfigs = model.NewDefaultAPIEndpoints(
+			c.ExternalDNSName,
+			subnetRefs,
+			c.HostedZoneID,
+			c.RecordSetTTL,
+			c.Controller.LoadBalancer.Private,
+		)
+	}
+
+	return nil
 }
 
 func ClusterFromBytesWithEncryptService(data []byte, encryptService EncryptService) (*Cluster, error) {
@@ -416,17 +467,19 @@ type ComputedDeploymentSettings struct {
 // Though it is highly configurable, it's basically users' responsibility to provide `correct` values if they're going beyond the defaults.
 type DeploymentSettings struct {
 	ComputedDeploymentSettings
-	ClusterName                 string                `yaml:"clusterName,omitempty"`
-	KeyName                     string                `yaml:"keyName,omitempty"`
-	Region                      model.Region          `yaml:",inline"`
-	AvailabilityZone            string                `yaml:"availabilityZone,omitempty"`
-	ReleaseChannel              string                `yaml:"releaseChannel,omitempty"`
-	AmiId                       string                `yaml:"amiId,omitempty"`
-	DeprecatedVPCID             string                `yaml:"vpcId,omitempty"`
-	VPC                         model.VPC             `yaml:"vpc,omitempty"`
-	DeprecatedInternetGatewayID string                `yaml:"internetGatewayId,omitempty"`
-	InternetGateway             model.InternetGateway `yaml:"internetGateway,omitempty"`
-	RouteTableID                string                `yaml:"routeTableId,omitempty"`
+	CloudFormation                        model.CloudFormation  `yaml:"cloudformation,omitempty"`
+	ClusterName                           string                `yaml:"clusterName,omitempty"`
+	S3URI                                 string                `yaml:"s3URI,omitempty"`
+	DisableContainerLinuxAutomaticUpdates string                `yaml:"disableContainerLinuxAutomaticUpdates,omitempty"`
+	KeyName                               string                `yaml:"keyName,omitempty"`
+	Region                                model.Region          `yaml:",inline"`
+	AvailabilityZone                      string                `yaml:"availabilityZone,omitempty"`
+	ReleaseChannel                        string                `yaml:"releaseChannel,omitempty"`
+	AmiId                                 string                `yaml:"amiId,omitempty"`
+	DeprecatedVPCID                       string                `yaml:"vpcId,omitempty"`
+	VPC                                   model.VPC             `yaml:"vpc,omitempty"`
+	DeprecatedInternetGatewayID           string                `yaml:"internetGatewayId,omitempty"`
+	InternetGateway                       model.InternetGateway `yaml:"internetGateway,omitempty"`
 	// Required for validations like e.g. if instance cidr is contained in vpc cidr
 	VPCCIDR                 string            `yaml:"vpcCIDR,omitempty"`
 	InstanceCIDR            string            `yaml:"instanceCIDR,omitempty"`
@@ -434,30 +487,33 @@ type DeploymentSettings struct {
 	ContainerRuntime        string            `yaml:"containerRuntime,omitempty"`
 	KMSKeyARN               string            `yaml:"kmsKeyArn,omitempty"`
 	StackTags               map[string]string `yaml:"stackTags,omitempty"`
-	Subnets                 []model.Subnet    `yaml:"subnets,omitempty"`
+	Subnets                 model.Subnets     `yaml:"subnets,omitempty"`
 	EIPAllocationIDs        []string          `yaml:"eipAllocationIDs,omitempty"`
-	MapPublicIPs            bool              `yaml:"mapPublicIPs,omitempty"`
 	ElasticFileSystemID     string            `yaml:"elasticFileSystemId,omitempty"`
 	SharedPersistentVolume  bool              `yaml:"sharedPersistentVolume,omitempty"`
 	SSHAuthorizedKeys       []string          `yaml:"sshAuthorizedKeys,omitempty"`
 	Addons                  model.Addons      `yaml:"addons"`
 	Experimental            Experimental      `yaml:"experimental"`
+	Kubelet                 Kubelet           `yaml:"kubelet"`
 	ManageCertificates      bool              `yaml:"manageCertificates,omitempty"`
 	WaitSignal              WaitSignal        `yaml:"waitSignal"`
 	CloudWatchLogging       `yaml:"cloudWatchLogging,omitempty"`
 	AmazonSsmAgent          `yaml:"amazonSsmAgent,omitempty"`
 	CloudFormationStreaming bool `yaml:"cloudFormationStreaming,omitempty"`
+	KubeProxy               `yaml:"kubeProxy,omitempty"`
 	KubeDns                 `yaml:"kubeDns,omitempty"`
-
+	KubernetesDashboard     `yaml:"kubernetesDashboard,omitempty"`
 	// Images repository
-	HyperkubeImage                     model.Image `yaml:"hyperkubeImage,omitempty"`
-	AWSCliImage                        model.Image `yaml:"awsCliImage,omitempty"`
+	HyperkubeImage model.Image `yaml:"hyperkubeImage,omitempty"`
+	AWSCliImage    model.Image `yaml:"awsCliImage,omitempty"`
+
 	CalicoNodeImage                    model.Image `yaml:"calicoNodeImage,omitempty"`
 	CalicoCniImage                     model.Image `yaml:"calicoCniImage,omitempty"`
 	CalicoCtlImage                     model.Image `yaml:"calicoCtlImage,omitempty"`
-	CalicoPolicyControllerImage        model.Image `yaml:"calicoPolicyControllerImage,omitempty"`
+	CalicoKubeControllersImage         model.Image `yaml:"calicoKubeControllersImage,omitempty"`
 	ClusterAutoscalerImage             model.Image `yaml:"clusterAutoscalerImage,omitempty"`
 	ClusterProportionalAutoscalerImage model.Image `yaml:"clusterProportionalAutoscalerImage,omitempty"`
+	KIAMImage                          model.Image `yaml:"kiamImage,omitempty"`
 	Kube2IAMImage                      model.Image `yaml:"kube2iamImage,omitempty"`
 	KubeDnsImage                       model.Image `yaml:"kubeDnsImage,omitempty"`
 	KubeDnsMasqImage                   model.Image `yaml:"kubeDnsMasqImage,omitempty"`
@@ -467,16 +523,17 @@ type DeploymentSettings struct {
 	HelmImage                          model.Image `yaml:"helmImage,omitempty"`
 	TillerImage                        model.Image `yaml:"tillerImage,omitempty"`
 	HeapsterImage                      model.Image `yaml:"heapsterImage,omitempty"`
+	MetricsServerImage                 model.Image `yaml:"metricsServerImage,omitempty"`
 	AddonResizerImage                  model.Image `yaml:"addonResizerImage,omitempty"`
-	KubeDashboardImage                 model.Image `yaml:"kubeDashboardImage,omitempty"`
+	KubernetesDashboardImage           model.Image `yaml:"kubernetesDashboardImage,omitempty"`
 	PauseImage                         model.Image `yaml:"pauseImage,omitempty"`
 	FlannelImage                       model.Image `yaml:"flannelImage,omitempty"`
 	JournaldCloudWatchLogsImage        model.Image `yaml:"journaldCloudWatchLogsImage,omitempty"`
+	Kubernetes                         Kubernetes  `yaml:"kubernetes,omitempty"`
 }
 
 // Part of configuration which is specific to worker nodes
 type DefaultWorkerSettings struct {
-	WorkerCount            int      `yaml:"workerCount,omitempty"`
 	WorkerCreateTimeout    string   `yaml:"workerCreateTimeout,omitempty"`
 	WorkerInstanceType     string   `yaml:"workerInstanceType,omitempty"`
 	WorkerRootVolumeType   string   `yaml:"workerRootVolumeType,omitempty"`
@@ -513,7 +570,6 @@ type Cluster struct {
 	FlannelSettings        `yaml:",inline"`
 	AdminAPIEndpointName   string              `yaml:"adminAPIEndpointName,omitempty"`
 	ServiceCIDR            string              `yaml:"serviceCIDR,omitempty"`
-	CreateRecordSet        bool                `yaml:"createRecordSet,omitempty"`
 	RecordSetTTL           int                 `yaml:"recordSetTTL,omitempty"`
 	TLSCADurationDays      int                 `yaml:"tlsCADurationDays,omitempty"`
 	TLSCertDurationDays    int                 `yaml:"tlsCertDurationDays,omitempty"`
@@ -524,6 +580,11 @@ type Cluster struct {
 	SSHAccessAllowedSourceCIDRs model.CIDRRanges       `yaml:"sshAccessAllowedSourceCIDRs,omitempty"`
 	CustomSettings              map[string]interface{} `yaml:"customSettings,omitempty"`
 	KubeResourcesAutosave       `yaml:"kubeResourcesAutosave,omitempty"`
+}
+
+// Kubelet options
+type Kubelet struct {
+	RotateCerts RotateCerts `yaml:"rotateCerts"`
 }
 
 type Experimental struct {
@@ -539,12 +600,13 @@ type Experimental struct {
 	TLSBootstrap                TLSBootstrap                   `yaml:"tlsBootstrap"`
 	NodeAuthorizer              NodeAuthorizer                 `yaml:"nodeAuthorizer"`
 	EphemeralImageStorage       EphemeralImageStorage          `yaml:"ephemeralImageStorage"`
+	KIAMSupport                 KIAMSupport                    `yaml:"kiamSupport,omitempty"`
 	Kube2IamSupport             Kube2IamSupport                `yaml:"kube2IamSupport,omitempty"`
+	GpuSupport                  GpuSupport                     `yaml:"gpuSupport,omitempty"`
 	KubeletOpts                 string                         `yaml:"kubeletOpts,omitempty"`
 	LoadBalancer                LoadBalancer                   `yaml:"loadBalancer"`
 	TargetGroup                 TargetGroup                    `yaml:"targetGroup"`
 	NodeDrainer                 model.NodeDrainer              `yaml:"nodeDrainer"`
-	Plugins                     Plugins                        `yaml:"plugins"`
 	Oidc                        model.Oidc                     `yaml:"oidc"`
 	DisableSecurityGroupIngress bool                           `yaml:"disableSecurityGroupIngress"`
 	NodeMonitorGracePeriod      string                         `yaml:"nodeMonitorGracePeriod"`
@@ -552,8 +614,19 @@ type Experimental struct {
 }
 
 type Admission struct {
-	PodSecurityPolicy  PodSecurityPolicy  `yaml:"podSecurityPolicy"`
-	DenyEscalatingExec DenyEscalatingExec `yaml:"denyEscalatingExec"`
+	PodSecurityPolicy                    PodSecurityPolicy                    `yaml:"podSecurityPolicy"`
+	AlwaysPullImages                     AlwaysPullImages                     `yaml:"alwaysPullImages"`
+	DenyEscalatingExec                   DenyEscalatingExec                   `yaml:"denyEscalatingExec"`
+	Initializers                         Initializers                         `yaml:"initializers"`
+	Priority                             Priority                             `yaml:"priority"`
+	MutatingAdmissionWebhook             MutatingAdmissionWebhook             `yaml:"mutatingAdmissionWebhook"`
+	ValidatingAdmissionWebhook           ValidatingAdmissionWebhook           `yaml:"validatingAdmissionWebhook"`
+	OwnerReferencesPermissionEnforcement OwnerReferencesPermissionEnforcement `yaml:"ownerReferencesPermissionEnforcement"`
+	PersistentVolumeClaimResize          PersistentVolumeClaimResize          `yaml:"persistentVolumeClaimResize"`
+}
+
+type AlwaysPullImages struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type PodSecurityPolicy struct {
@@ -564,10 +637,36 @@ type DenyEscalatingExec struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type Initializers struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type Priority struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type MutatingAdmissionWebhook struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type ValidatingAdmissionWebhook struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type OwnerReferencesPermissionEnforcement struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type PersistentVolumeClaimResize struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type AuditLog struct {
-	Enabled bool   `yaml:"enabled"`
-	MaxAge  int    `yaml:"maxage"`
-	LogPath string `yaml:"logpath"`
+	Enabled   bool   `yaml:"enabled"`
+	LogPath   string `yaml:"logPath"`
+	MaxAge    int    `yaml:"maxAge"`
+	MaxBackup int    `yaml:"maxBackup"`
+	MaxSize   int    `yaml:"maxSize"`
 }
 
 type Authentication struct {
@@ -597,6 +696,10 @@ type TLSBootstrap struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type RotateCerts struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type NodeAuthorizer struct {
 	Enabled bool `yaml:"enabled"`
 }
@@ -607,8 +710,18 @@ type EphemeralImageStorage struct {
 	Filesystem string `yaml:"filesystem"`
 }
 
+type KIAMSupport struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type Kube2IamSupport struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+type GpuSupport struct {
+	Enabled      bool   `yaml:"enabled"`
+	Version      string `yaml:"version"`
+	InstallImage string `yaml:"installImage"`
 }
 
 type KubeResourcesAutosave struct {
@@ -632,6 +745,40 @@ type LocalStreaming struct {
 	Enabled  bool   `yaml:"enabled"`
 	Filter   string `yaml:"filter"`
 	interval int    `yaml:"interval"`
+}
+
+type Kubernetes struct {
+	Networking        Networking        `yaml:"networking,omitempty"`
+	ControllerManager ControllerManager `yaml:"controllerManager,omitempty"`
+}
+
+type ControllerManager struct {
+	ComputeResources ComputeResources `yaml:"resources,omitempty"`
+}
+
+type ComputeResources struct {
+	Requests ResourceQuota `yaml:"requests,omitempty"`
+	Limits   ResourceQuota `yaml:"limits,omitempty"`
+}
+
+type ResourceQuota struct {
+	Cpu    string `yaml:"cpu"`
+	Memory string `yaml:"memory"`
+}
+
+type Networking struct {
+	SelfHosting SelfHosting `yaml:"selfHosting"`
+}
+
+type SelfHosting struct {
+	Enabled         bool        `yaml:"enabled"`
+	Type            string      `yaml:"type"`
+	Typha           bool        `yaml:"typha"`
+	CalicoNodeImage model.Image `yaml:"calicoNodeImage"`
+	CalicoCniImage  model.Image `yaml:"calicoCniImage"`
+	FlannelImage    model.Image `yaml:"flannelImage"`
+	FlannelCniImage model.Image `yaml:"flannelCniImage"`
+	TyphaImage      model.Image `yaml:"typhaImage"`
 }
 
 func (c *LocalStreaming) Interval() int64 {
@@ -658,22 +805,39 @@ type TargetGroup struct {
 	SecurityGroupIds []string `yaml:"securityGroupIds"`
 }
 
-type Plugins struct {
-	Rbac Rbac `yaml:"rbac"`
+type KubeProxy struct {
+	IPVSMode IPVSMode `yaml:"ipvsMode"`
 }
 
-type Rbac struct {
-	Enabled bool `yaml:"enabled"`
+type IPVSMode struct {
+	Enabled       bool   `yaml:"enabled"`
+	Scheduler     string `yaml:"scheduler"`
+	SyncPeriod    string `yaml:"syncPeriod"`
+	MinSyncPeriod string `yaml:"minSyncPeriod"`
+}
+
+type KubeDnsAutoscaler struct {
+	CoresPerReplica int `yaml:"coresPerReplica"`
+	NodesPerReplica int `yaml:"nodesPerReplica"`
+	Min             int `yaml:"min"`
 }
 
 type KubeDns struct {
-	NodeLocalResolver bool `yaml:"nodeLocalResolver"`
+	NodeLocalResolver   bool              `yaml:"nodeLocalResolver"`
+	DeployToControllers bool              `yaml:"deployToControllers"`
+	Autoscaler          KubeDnsAutoscaler `yaml:"autoscaler"`
 }
 
 func (c *KubeDns) MergeIfEmpty(other KubeDns) {
-	if c.NodeLocalResolver == false {
+	if c.NodeLocalResolver == false && c.DeployToControllers == false {
 		c.NodeLocalResolver = other.NodeLocalResolver
+		c.DeployToControllers = other.DeployToControllers
 	}
+}
+
+type KubernetesDashboard struct {
+	AdminPrivileges bool `yaml:"adminPrivileges"`
+	InsecureLogin   bool `yaml:"insecureLogin"`
 }
 
 type WaitSignal struct {
@@ -706,6 +870,15 @@ var supportedReleaseChannels = map[string]bool{
 	"alpha":  true,
 	"beta":   true,
 	"stable": true,
+}
+
+func (c DeploymentSettings) ApiServerLeaseEndpointReconciler() (bool, error) {
+	constraint, err := semver.NewConstraint(">= 1.9")
+	if err != nil {
+		return false, fmt.Errorf("[BUG] .ApiServerLeaseEndpointReconciler min version could not be parsed")
+	}
+	version, _ := semver.NewVersion(c.K8sVer) // already validated in Validate()
+	return constraint.Check(version), nil
 }
 
 func (c ControllerSettings) MinControllerCount() int {
@@ -826,7 +999,7 @@ type StackTemplateOptions struct {
 	SkipWait              bool
 }
 
-func (c Cluster) StackConfig(opts StackTemplateOptions, extra ...[]*pluginmodel.Plugin) (*StackConfig, error) {
+func (c Cluster) StackConfig(stackName string, opts StackTemplateOptions, extra ...[]*pluginmodel.Plugin) (*StackConfig, error) {
 	plugins := []*pluginmodel.Plugin{}
 	if len(extra) > 0 {
 		plugins = extra[0]
@@ -834,6 +1007,7 @@ func (c Cluster) StackConfig(opts StackTemplateOptions, extra ...[]*pluginmodel.
 
 	var err error
 	stackConfig := StackConfig{
+		StackName:         stackName,
 		ExtraCfnResources: map[string]interface{}{},
 	}
 
@@ -844,7 +1018,7 @@ func (c Cluster) StackConfig(opts StackTemplateOptions, extra ...[]*pluginmodel.
 	var compactAssets *CompactAssets
 
 	if c.AssetsEncryptionEnabled() {
-		compactAssets, err = ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, KMSConfig{
+		compactAssets, err = ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, c.Experimental.TLSBootstrap.Enabled, c.Experimental.KIAMSupport.Enabled, KMSConfig{
 			Region:         stackConfig.Config.Region,
 			KMSKeyARN:      c.KMSKeyARN,
 			EncryptService: c.ProvidedEncryptService,
@@ -855,16 +1029,12 @@ func (c Cluster) StackConfig(opts StackTemplateOptions, extra ...[]*pluginmodel.
 
 		stackConfig.Config.AssetsConfig = compactAssets
 	} else {
-		rawAssets, err := ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates)
+		rawAssets, err := ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates, c.Experimental.TLSBootstrap.Enabled, c.Experimental.KIAMSupport.Enabled)
 		if err != nil {
 			return nil, err
 		}
 
 		stackConfig.Config.AssetsConfig = rawAssets
-	}
-
-	if c.Experimental.TLSBootstrap.Enabled && !c.Experimental.Plugins.Rbac.Enabled {
-		fmt.Println(`WARNING: enabling cluster-level TLS bootstrapping without RBAC is not recommended. See https://kubernetes.io/docs/admin/kubelet-tls-bootstrapping/ for more information`)
 	}
 
 	stackConfig.StackTemplateOptions = opts
@@ -876,6 +1046,19 @@ func (c Cluster) StackConfig(opts StackTemplateOptions, extra ...[]*pluginmodel.
 	}
 
 	return &stackConfig, nil
+}
+
+type InitialConfig struct {
+	AmiId            string
+	AvailabilityZone string
+	ClusterName      string
+	ExternalDNSName  string
+	HostedZoneID     string
+	KMSKeyARN        string
+	KeyName          string
+	NoRecordSet      bool
+	Region           model.Region
+	S3URI            string
 }
 
 // Config contains configuration parameters available when rendering userdata injected into a controller or an etcd node from golang text templates
@@ -897,12 +1080,8 @@ type Config struct {
 	APIServerFlags   pluginmodel.APIServerFlags
 }
 
-// StackName returns the logical name of a CloudFormation stack resource in a root stack template
-// This is not needed to be unique in an AWS account because the actual name of a nested stack is generated randomly
-// by CloudFormation by including the logical name.
-// This is NOT intended to be used to reference stack name from cloud-config as the target of awscli or cfn-bootstrap-tools commands e.g. `cfn-init` and `cfn-signal`
-func (c Cluster) StackName() string {
-	return "control-plane"
+func (c Cluster) StackNameEnvFileName() string {
+	return "/etc/environment"
 }
 
 func (c Cluster) StackNameEnvVarName() string {
@@ -965,11 +1144,31 @@ func (c Cluster) ExternalDNSNames() []string {
 	return names
 }
 
-// NestedStackName returns a sanitized name of this control-plane which is usable as a valid cloudformation nested stack name
-func (c Cluster) NestedStackName() string {
-	// Convert stack name into something valid as a cfn resource name or
-	// we'll end up with cfn errors like "Template format error: Resource name test5-controlplane is non alphanumeric"
-	return strings.Title(strings.Replace(c.StackName(), "-", "", -1))
+// APIAccessAllowedSourceCIDRsForControllerSG returns all the CIDRs of Kubernetes API endpoints that controller nodes must allow access from
+func (c Cluster) APIAccessAllowedSourceCIDRsForControllerSG() []string {
+	cidrs := []string{}
+	seen := map[string]bool{}
+
+	for _, e := range c.APIEndpointConfigs {
+		if !e.LoadBalancer.NetworkLoadBalancer() {
+			continue
+		}
+
+		ranges := e.LoadBalancer.APIAccessAllowedSourceCIDRs
+		if len(ranges) > 0 {
+			for _, r := range ranges {
+				val := r.String()
+				if _, ok := seen[val]; !ok {
+					cidrs = append(cidrs, val)
+					seen[val] = true
+				}
+			}
+		}
+	}
+
+	sort.Strings(cidrs)
+
+	return cidrs
 }
 
 func (c Cluster) NodeLabels() model.NodeLabels {
@@ -989,28 +1188,6 @@ func (c Cluster) validate() error {
 	validClusterNaming := regexp.MustCompile("^[a-zA-Z0-9-:]+$")
 	if !validClusterNaming.MatchString(c.ClusterName) {
 		return fmt.Errorf("clusterName(=%s) is malformed. It must consist only of alphanumeric characters, colons, or hyphens", c.ClusterName)
-	}
-
-	if c.CreateRecordSet {
-		if c.HostedZoneID == "" {
-			return errors.New("hostedZoneID must be specified when createRecordSet is true")
-		}
-
-		if c.RecordSetTTL < 1 {
-			return errors.New("TTL must be at least 1 second")
-		}
-	} else {
-		if c.RecordSetTTL != NewDefaultCluster().RecordSetTTL {
-			return errors.New(
-				"recordSetTTL should not be modified when createRecordSet is false",
-			)
-		}
-
-		if c.HostedZoneID != "" {
-			return errors.New(
-				"hostedZoneId should not be modified when createRecordSet is false",
-			)
-		}
 	}
 
 	var dnsServiceIPAddr net.IP
@@ -1079,7 +1256,7 @@ func (c Cluster) validate() error {
 
 	clusterNamePlaceholder := "<my-cluster-name>"
 	nestedStackNamePlaceHolder := "<my-nested-stack-name>"
-	replacer := strings.NewReplacer(clusterNamePlaceholder, "", nestedStackNamePlaceHolder, c.StackName())
+	replacer := strings.NewReplacer(clusterNamePlaceholder, "", nestedStackNamePlaceHolder, ControlPlaneStackName)
 	simulatedLcName := fmt.Sprintf("%s-%s-1N2C4K3LLBEDZ-%sLC-BC2S9P3JG2QD", clusterNamePlaceholder, nestedStackNamePlaceHolder, c.Controller.LogicalName())
 	limit := 63 - len(replacer.Replace(simulatedLcName))
 	if c.Experimental.AwsNodeLabels.Enabled && len(c.ClusterName) > limit {
@@ -1095,7 +1272,7 @@ func (c Cluster) validate() error {
 			return e
 		}
 	} else {
-		if e := cfnresource.ValidateUnstableRoleNameLength(c.ClusterName, c.NestedStackName(), c.Controller.IAMConfig.Role.Name, c.Region.String()); e != nil {
+		if e := cfnresource.ValidateUnstableRoleNameLength(c.ClusterName, naming.FromStackToCfnResource(ControlPlaneStackName), c.Controller.IAMConfig.Role.Name, c.Region.String()); e != nil {
 			return e
 		}
 	}
@@ -1104,9 +1281,20 @@ func (c Cluster) validate() error {
 		if !c.Experimental.TLSBootstrap.Enabled {
 			return fmt.Errorf("TLS bootstrap is required in order to enable the node authorizer")
 		}
+	}
 
-		if !c.Experimental.Plugins.Rbac.Enabled {
-			return fmt.Errorf("RBAC is required in order to enable the node authorizer")
+	for i, e := range c.APIEndpointConfigs {
+		if e.LoadBalancer.NetworkLoadBalancer() && !c.Region.SupportsNetworkLoadBalancers() {
+			return fmt.Errorf("api endpoint %d is not valid: network load balancer not supported in region", i)
+		}
+	}
+
+	if c.Kubernetes.Networking.SelfHosting.Enabled {
+		if (c.Kubernetes.Networking.SelfHosting.Type != "canal") && (c.Kubernetes.Networking.SelfHosting.Type != "flannel") {
+			return fmt.Errorf("networkingdaemonsets - style must be either 'canal' or 'flannel'")
+		}
+		if c.Kubernetes.Networking.SelfHosting.Typha && c.Kubernetes.Networking.SelfHosting.Type != "canal" {
+			return fmt.Errorf("networkingdaemonsets - you can only enable typha when deploying type 'canal'")
 		}
 	}
 
@@ -1150,16 +1338,24 @@ func (c DeploymentSettings) Validate() (*DeploymentValidationResult, error) {
 	if c.ClusterName == "" {
 		return nil, errors.New("clusterName must be set")
 	}
+	if c.S3URI == "" {
+		return nil, errors.New("s3URI must be set")
+	}
 	if c.KMSKeyARN == "" && c.AssetsEncryptionEnabled() {
 		return nil, errors.New("kmsKeyArn must be set")
 	}
 
-	if !c.VPC.HasIdentifier() && (c.RouteTableID != "" || c.InternetGateway.HasIdentifier()) {
-		return nil, errors.New("vpc id must be specified if route table id or internet gateway id are specified")
-	}
-
 	if c.Region.IsEmpty() {
 		return nil, errors.New("region must be set")
+	}
+
+	_, err := semver.NewVersion(c.K8sVer)
+	if err != nil {
+		return nil, errors.New("kubernetesVersion must be a valid version")
+	}
+
+	if c.KMSKeyARN != "" && !c.Region.IsEmpty() && !strings.Contains(c.KMSKeyARN, c.Region.String()) {
+		return nil, errors.New("kmsKeyArn must reference the same region as the one being deployed to")
 	}
 
 	_, vpcNet, err := net.ParseCIDR(c.VPCCIDR)
@@ -1223,11 +1419,11 @@ func (c DeploymentSettings) Validate() (*DeploymentValidationResult, error) {
 				)
 			}
 
-			if subnet.RouteTableID() != "" && c.RouteTableID != "" {
-				return nil, fmt.Errorf("either subnets[].routeTable.id(%s) or routeTableId(%s) but not both can be specified", subnet.RouteTableID(), c.RouteTableID)
+			if !c.VPC.HasIdentifier() && (subnet.RouteTable.HasIdentifier() || c.InternetGateway.HasIdentifier()) {
+				return nil, errors.New("vpcId must be specified if subnets[].routeTable.id or internetGateway.id are specified")
 			}
 
-			if subnet.ManageSubnet() && (subnet.Public() && c.MapPublicIPs) && c.VPC.HasIdentifier() && (subnet.ManageRouteTable() && c.RouteTableID == "") && !c.InternetGateway.HasIdentifier() {
+			if subnet.ManageSubnet() && subnet.Public() && c.VPC.HasIdentifier() && subnet.ManageRouteTable() && !c.InternetGateway.HasIdentifier() {
 				return nil, errors.New("internet gateway id can't be omitted when there're one or more managed public subnets in an existing VPC")
 			}
 		}
@@ -1235,17 +1431,13 @@ func (c DeploymentSettings) Validate() (*DeploymentValidationResult, error) {
 		// All the subnets are explicitly/implicitly(they're public by default) configured to be "public".
 		// They're also configured to reuse existing route table(s).
 		// However, the IGW, which won't be applied to anywhere, is specified
-		if (allPublic && c.MapPublicIPs) && (c.RouteTableID != "" || allExistingRouteTable) && c.InternetGateway.HasIdentifier() {
+		if allPublic && allExistingRouteTable && c.InternetGateway.HasIdentifier() {
 			return nil, errors.New("internet gateway id can't be specified when all the public subnets have existing route tables associated. kube-aws doesn't try to modify an exisinting route table to include a route to the internet gateway")
 		}
 
 		// All the subnets are explicitly configured to be "private" but the IGW, which won't be applied anywhere, is specified
-		if (allPrivate || !c.MapPublicIPs) && c.InternetGateway.HasIdentifier() {
+		if allPrivate && c.InternetGateway.HasIdentifier() {
 			return nil, errors.New("internet gateway id can't be specified when all the subnets are existing private subnets")
-		}
-
-		if c.RouteTableID != "" && !allPublic && !allPrivate {
-			return nil, fmt.Errorf("network topology including both private and public subnets specified while the single route table(%s) is also specified. You must differentiate the route table at least between private and public subnets. Use subets[].routeTable.id instead of routeTableId for that.", c.RouteTableID)
 		}
 
 		for i, a := range instanceCIDRs {
@@ -1258,7 +1450,7 @@ func (c DeploymentSettings) Validate() (*DeploymentValidationResult, error) {
 		}
 	}
 
-	if err := c.Experimental.Validate(); err != nil {
+	if err := c.Experimental.Validate("controller"); err != nil {
 		return nil, err
 	}
 
@@ -1275,7 +1467,7 @@ func (c DeploymentSettings) AssetsEncryptionEnabled() bool {
 	return c.ManageCertificates && c.Region.SupportsKMS()
 }
 
-func (s DeploymentSettings) AllSubnets() []model.Subnet {
+func (s DeploymentSettings) AllSubnets() model.Subnets {
 	subnets := s.Subnets
 	return subnets
 }
@@ -1293,7 +1485,7 @@ func (c DeploymentSettings) FindSubnetMatching(condition model.Subnet) model.Sub
 	panic(fmt.Errorf("No subnet matching %v found in %s", condition, out))
 }
 
-func (c DeploymentSettings) PrivateSubnets() []model.Subnet {
+func (c DeploymentSettings) PrivateSubnets() model.Subnets {
 	result := []model.Subnet{}
 	for _, s := range c.Subnets {
 		if s.Private {
@@ -1303,7 +1495,7 @@ func (c DeploymentSettings) PrivateSubnets() []model.Subnet {
 	return result
 }
 
-func (c DeploymentSettings) PublicSubnets() []model.Subnet {
+func (c DeploymentSettings) PublicSubnets() model.Subnets {
 	result := []model.Subnet{}
 	for _, s := range c.Subnets {
 		if !s.Private {
@@ -1351,7 +1543,7 @@ func (c DeploymentSettings) NATGateways() []model.NATGateway {
 
 func (c DefaultWorkerSettings) Validate() error {
 	if c.WorkerRootVolumeType == "io1" {
-		if c.WorkerRootVolumeIOPS < 100 || c.WorkerRootVolumeIOPS > 2000 {
+		if c.WorkerRootVolumeIOPS < 100 || c.WorkerRootVolumeIOPS > 20000 {
 			return fmt.Errorf("invalid workerRootVolumeIOPS: %d", c.WorkerRootVolumeIOPS)
 		}
 	} else {
@@ -1364,10 +1556,6 @@ func (c DefaultWorkerSettings) Validate() error {
 		}
 	}
 
-	if c.WorkerCount != 0 {
-		return errors.New("`workerCount` is removed. Set worker.nodePools[].count per node pool instead")
-	}
-
 	return nil
 }
 
@@ -1376,7 +1564,7 @@ func (c ControllerSettings) Validate() error {
 	rootVolume := controller.RootVolume
 
 	if rootVolume.Type == "io1" {
-		if rootVolume.IOPS < 100 || rootVolume.IOPS > 2000 {
+		if rootVolume.IOPS < 100 || rootVolume.IOPS > 20000 {
 			return fmt.Errorf("invalid controller.rootVolume.iops: %d", rootVolume.IOPS)
 		}
 	} else {
@@ -1431,9 +1619,13 @@ func (e EtcdSettings) Validate() error {
 	return nil
 }
 
-func (c Experimental) Validate() error {
+func (c Experimental) Validate(name string) error {
 	if err := c.NodeDrainer.Validate(); err != nil {
 		return err
+	}
+
+	if c.Kube2IamSupport.Enabled && c.KIAMSupport.Enabled {
+		return fmt.Errorf("at '%s', you can enable kube2IamSupport or kiamSupport, but not both", name)
 	}
 
 	return nil

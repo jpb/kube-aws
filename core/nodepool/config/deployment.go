@@ -6,7 +6,7 @@ import (
 	cfg "github.com/kubernetes-incubator/kube-aws/core/controlplane/config"
 )
 
-func (c DeploymentSettings) ValidateInputs() error {
+func (c DeploymentSettings) ValidateInputs(name string) error {
 	// By design, kube-aws doesn't allow customizing the following settings among node pools.
 	//
 	// Every node pool imports subnets from the main stack and therefore there's no need for setting:
@@ -23,17 +23,11 @@ func (c DeploymentSettings) ValidateInputs() error {
 	if c.InternetGateway.HasIdentifier() {
 		return fmt.Errorf("although you can't customize internet gateway per node pool but you did specify \"%v\" in your cluster.yaml", c.InternetGateway)
 	}
-	if c.RouteTableID != "" {
-		return fmt.Errorf("although you can't customize `routeTableId` per node pool but you did specify \"%s\" in your cluster.yaml", c.RouteTableID)
-	}
 	if c.VPCCIDR != "" {
 		return fmt.Errorf("although you can't customize `vpcCIDR` per node pool but you did specify \"%s\" in your cluster.yaml", c.VPCCIDR)
 	}
 	if c.InstanceCIDR != "" {
 		return fmt.Errorf("although you can't customize `instanceCIDR` per node pool but you did specify \"%s\" in your cluster.yaml", c.InstanceCIDR)
-	}
-	if c.MapPublicIPs {
-		return fmt.Errorf("although you can't customize `mapPublicIPs` per node pool but you did specify %v in your cluster.yaml", c.MapPublicIPs)
 	}
 	if c.ElasticFileSystemID != "" {
 		return fmt.Errorf("although you can't customize `elasticFileSystemId` per node pool but you did specify \"%s\" in your cluster.yaml", c.ElasticFileSystemID)
@@ -54,15 +48,15 @@ func (c DeploymentSettings) ValidateInputs() error {
 		return fmt.Errorf("although you can't customize `kmsKeyArn` per node pool but you did specify \"%s\" in your cluster.yaml", c.KMSKeyARN)
 	}
 
-	if err := c.Experimental.Validate(); err != nil {
+	if err := c.Experimental.Validate(name); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s DeploymentSettings) Validate() error {
-	if err := s.Experimental.Validate(); err != nil {
+func (s DeploymentSettings) Validate(name string) error {
+	if err := s.Experimental.Validate(name); err != nil {
 		return err
 	}
 	return nil
@@ -136,6 +130,9 @@ func (c DeploymentSettings) WithDefaultsFrom(main cfg.DeploymentSettings) Deploy
 
 	//Inherit main KubeDns config
 	c.KubeDns.MergeIfEmpty(main.KubeDns)
+
+	//Inherit main Kubernetes config (e.g. for Kubernetes.Networking.SelfHosting etc.)
+	c.Kubernetes = main.Kubernetes
 
 	return c
 }

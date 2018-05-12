@@ -13,7 +13,7 @@ type Controller struct {
 	LoadBalancer       ControllerElb       `yaml:"loadBalancer,omitempty"`
 	IAMConfig          IAMConfig           `yaml:"iam,omitempty"`
 	SecurityGroupIds   []string            `yaml:"securityGroupIds"`
-	Subnets            []Subnet            `yaml:"subnets,omitempty"`
+	Subnets            Subnets             `yaml:"subnets,omitempty"`
 	CustomFiles        []CustomFile        `yaml:"customFiles,omitempty"`
 	CustomSystemdUnits []CustomSystemdUnit `yaml:"customSystemdUnits,omitempty"`
 	NodeSettings       `yaml:",inline"`
@@ -52,7 +52,7 @@ func (c Controller) SecurityGroupRefs() []string {
 
 	refs = append(
 		refs,
-		`{"Ref":"SecurityGroupController"}`,
+		`{"Fn::ImportValue" : {"Fn::Sub" : "${NetworkStackName}-ControllerSecurityGroup"}}`,
 	)
 
 	return refs
@@ -79,5 +79,5 @@ func (c Controller) Validate() error {
 
 type ControllerElb struct {
 	Private bool
-	Subnets []Subnet
+	Subnets Subnets
 }

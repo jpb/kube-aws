@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
 )
 
 const CacheFileExtension = "enc"
@@ -80,7 +81,25 @@ func EncryptedCredentialCacheFromRawCredential(raw *RawCredentialOnDisk, bytesEn
 }
 
 func RawCredentialFileFromPath(filePath string, defaultValue *string) (*RawCredentialOnDisk, error) {
-	if _, err := os.Stat(filePath); os.IsNotExist(err) && defaultValue != nil {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		if defaultValue == nil {
+			return nil, fmt.Errorf("%s must exist. Please confirm that you have not deleted the file manually", filePath)
+		}
+		// special default value that allows lookup from another file
+		re := regexp.MustCompile("^<<<([a-z./-]+.pem)$")
+		if re.MatchString(*defaultValue) {
+			readPath := re.FindStringSubmatch(*defaultValue)
+			if _, err := os.Stat(readPath[1]); os.IsNotExist(err) {
+				return nil, fmt.Errorf("%s and alternate file %s do not exist. Please confirm that you have not deleted them manually", filePath, readPath[1])
+			}
+			fmt.Printf("INFO: creating \"%s\" with contents of \"%s\"\n", filePath, readPath[1])
+			content, err := ioutil.ReadFile(readPath[1])
+			if err != nil {
+				return nil, err
+			}
+			newDefault := string(content[:])
+			return RawCredentialFileFromPath(filePath, &newDefault)
+		}
 		if err := ioutil.WriteFile(filePath, []byte(*defaultValue), 0644); err != nil {
 			return nil, err
 		}
@@ -102,6 +121,9 @@ func (c *RawCredentialOnDisk) Fingerprint() string {
 }
 
 func (c *RawCredentialOnDisk) Persist() error {
+	if len(c.content) == 0 {
+		return fmt.Errorf("%s is going to be empty. Maybe a bug", c.filePath)
+	}
 	if err := ioutil.WriteFile(c.filePath, c.content, 0600); err != nil {
 		return err
 	}

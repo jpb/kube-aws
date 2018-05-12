@@ -4,7 +4,6 @@
 [![Build Status](https://travis-ci.org/kubernetes-incubator/kube-aws.svg?branch=master)](https://travis-ci.org/kubernetes-incubator/kube-aws)
 [![License](https://img.shields.io/badge/license-Apache%20License%202.0-blue.svg)](LICENSE)
 
-
 **Note**: The `master` branch may be in an *unstable or even broken state* during development. Please use [releases](https://github.com/kubernetes-incubator/kube-aws/releases) instead of the `master` branch in order to get stable binaries.
 
 `kube-aws` is a command-line tool to create/update/destroy Kubernetes clusters on AWS.
@@ -31,6 +30,7 @@ Generate `cluster.yaml`:
 $ mkdir my-cluster
 $ cd my-cluster
 $ kube-aws init --cluster-name=my-cluster \
+--s3-uri=s3://examplebucket/mydir \
 --external-dns-name=<my-cluster-endpoint> \
 --region=us-west-1 \
 --availability-zone=us-west-1c \
@@ -48,19 +48,25 @@ $ kube-aws render credentials --generate-ca
 $ kube-aws render stack
 ```
 
+View generated certificates:
+
+```
+$ kube-aws show certificates
+```
+
 Validate configuration:
 
 ```
-$ kube-aws validate --s3-uri s3://<your-bucket>/<optional-prefix>
+$ kube-aws validate
 ```
 
 Launch:
 
 ```
-$ kube-aws up --s3-uri s3://<your-bucket>/<optional-prefix>
+$ kube-aws up 
 
 # Or export your cloudformation stack and dependent assets into the `exported/` directory
-$ kube-aws up --s3-uri s3://<your-bucket>/<optional-prefix> --export
+$ kube-aws up --export
 
 # Access the cluster
 $ KUBECONFIG=kubeconfig kubectl get nodes --show-labels
@@ -71,13 +77,13 @@ Update:
 ```
 $ $EDITOR cluster.yaml
 # Update all the cfn stacks including the one for control-plane and the ones for worker node pools
-$ kube-aws update --s3-uri s3://<your-bucket>/<optional-prefix>
+$ kube-aws update 
 ```
 
 Destroy:
 
 ```
-# Destroy all the cfn stacks including the one for control-plane and the ones for worker node pools
+# Destroy all the cfn stacks including the one for control-plane and the ones for worker node pools. Use `--force` for skip confirmation. 
 $ kube-aws destroy
 ```
 
@@ -85,7 +91,7 @@ $ kube-aws destroy
 
 Extra or advanced topics in for kube-aws:
 
-* [Known Limitations](/Documentation/kubernetes-on-aws-limitations.md)
+* [Known Limitations](/docs/troubleshooting/known-limitations.md)
 * [Roadmap](/ROADMAP.md)
 
 The following links can be useful for development:

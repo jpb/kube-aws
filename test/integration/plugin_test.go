@@ -19,14 +19,12 @@ func TestPlugin(t *testing.T) {
 	s3URI, s3URIExists := os.LookupEnv("KUBE_AWS_S3_DIR_URI")
 
 	if !s3URIExists || s3URI == "" {
-		s3URI = "s3://examplebucket/exampledir"
+		s3URI = "s3://mybucket/mydir"
 		t.Logf(`Falling back s3URI to a stub value "%s" for tests of validating stack templates. No assets will actually be uploaded to S3`, s3URI)
 	}
 
-	mainClusterYaml := kubeAwsSettings.mainClusterYaml()
-	minimalValidConfigYaml := mainClusterYaml + `
-availabilityZone: us-west-1c
-`
+	minimalValidConfigYaml := kubeAwsSettings.minimumValidClusterYamlWithAZ("c")
+
 	validCases := []struct {
 		context       string
 		clusterYaml   string
@@ -37,6 +35,8 @@ availabilityZone: us-west-1c
 		{
 			context: "WithAddons",
 			clusterYaml: minimalValidConfigYaml + `
+
+
 kubeAwsPlugins:
   myPlugin:
     enabled: true
@@ -109,6 +109,30 @@ spec:
                   }
                 }
         root:
+          resources:
+            append:
+              inline: |
+                {
+                  "QueueFromMyPlugin": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                    "QueueName": {{quote .Values.queue.name}}
+                    }
+                  }
+                }
+        etcd:
+          resources:
+            append:
+              inline: |
+                {
+                  "QueueFromMyPlugin": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                    "QueueName": {{quote .Values.queue.name}}
+                    }
+                  }
+                }
+        network:
           resources:
             append:
               inline: |
@@ -255,6 +279,7 @@ spec:
 				func(c root.Cluster, t *testing.T) {
 					cp := c.ControlPlane()
 					np := c.NodePools()[0]
+					etcd := c.Etcd()
 
 					{
 						e := model.CustomFile{
@@ -293,13 +318,12 @@ spec:
 					}
 
 					{
-
 						e := model.CustomFile{
 							Path:        "/var/kube-aws/bar.txt",
 							Permissions: 0644,
 							Content:     "etcd-bar",
 						}
-						a := cp.StackConfig.Etcd.CustomFiles[0]
+						a := etcd.StackConfig.Etcd.CustomFiles[0]
 						if !reflect.DeepEqual(e, a) {
 							t.Errorf("Unexpected etcd custom file from plugin: expected=%v actual=%v", e, a)
 						}
@@ -310,7 +334,7 @@ spec:
 							Permissions: 0644,
 							Content:     "etcd-baz",
 						}
-						a := cp.StackConfig.Etcd.CustomFiles[1]
+						a := etcd.StackConfig.Etcd.CustomFiles[1]
 						if !reflect.DeepEqual(e, a) {
 							t.Errorf("Unexpected etcd custom file from plugin: expected=%v actual=%v", e, a)
 						}
@@ -323,7 +347,7 @@ spec:
 								Resources: []string{"*"},
 							},
 						}
-						a := cp.StackConfig.Etcd.IAMConfig.Policy.Statements
+						a := etcd.StackConfig.Etcd.IAMConfig.Policy.Statements
 						if !reflect.DeepEqual(e, a) {
 							t.Errorf("Unexpected etcd iam policy statements from plugin: expected=%v actual=%v", e, a)
 						}
@@ -371,7 +395,7 @@ spec:
 						t.Errorf("Invalid controller userdata: %v", controllerUserdataS3Part)
 					}
 
-					etcdUserdataS3Part := cp.UserDataEtcd.Parts[model.USERDATA_S3].Asset.Content
+					etcdUserdataS3Part := etcd.UserDataEtcd.Parts[model.USERDATA_S3].Asset.Content
 					if !strings.Contains(etcdUserdataS3Part, "save-queue-name.service") {
 						t.Errorf("Invalid etcd userdata: %v", etcdUserdataS3Part)
 					}
@@ -484,7 +508,7 @@ spec:
 				})
 
 				helper.WithDummyCredentials(func(dummyAssetsDir string) {
-					var stackTemplateOptions = root.NewOptions(s3URI, false, false)
+					var stackTemplateOptions = root.NewOptions(false, false)
 					stackTemplateOptions.AssetsDir = dummyAssetsDir
 					stackTemplateOptions.ControllerTmplFile = "../../core/controlplane/config/templates/cloud-config-controller"
 					stackTemplateOptions.WorkerTmplFile = "../../core/controlplane/config/templates/cloud-config-worker"
@@ -492,6 +516,8 @@ spec:
 					stackTemplateOptions.RootStackTemplateTmplFile = "../../core/root/config/templates/stack-template.json"
 					stackTemplateOptions.NodePoolStackTemplateTmplFile = "../../core/nodepool/config/templates/stack-template.json"
 					stackTemplateOptions.ControlPlaneStackTemplateTmplFile = "../../core/controlplane/config/templates/stack-template.json"
+					stackTemplateOptions.EtcdStackTemplateTmplFile = "../../core/etcd/config/templates/stack-template.json"
+					stackTemplateOptions.NetworkStackTemplateTmplFile = "../../core/network/config/templates/stack-template.json"
 
 					cluster, err := root.ClusterFromConfig(providedConfig, stackTemplateOptions, false)
 					if err != nil {

@@ -1,6 +1,5 @@
-{{ define "instance" -}}
+{{ define "instance-script" -}}
 {{- $S3URI := self.Parts.s3.Asset.S3URL -}}
-#!/bin/bash -xe
 echo '{{.EtcdIndexEnvVarName}}={{extra.etcdIndex}}' >> {{.EtcdNodeEnvFileName}}
  . /etc/environment
 export COREOS_PRIVATE_IPV4 COREOS_PRIVATE_IPV6 COREOS_PUBLIC_IPV4 COREOS_PUBLIC_IPV6
@@ -19,38 +18,64 @@ run() {
     sleep 1
   done
 }
-run aws s3 --region $REGION  cp {{ $S3URI }}  /var/run/coreos/$USERDATA_FILE
+run bash -c "aws configure set s3.signature_version s3v4; aws s3 --region $REGION cp {{ $S3URI }} /var/run/coreos/$USERDATA_FILE"
 
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
-run /bin/sh -c 'echo {{.StackNameEnvVarName}}=$(aws ec2 describe-tags --region "'$REGION'" --filters \
-  "Name=resource-id,Values='$INSTANCE_ID'" \
-  "Name=key,Values=aws:cloudformation:stack-name" \
-  --output json \
-| jq -r ".Tags[].Value") >> {{.EtcdNodeEnvFileName}}'
-
-
 exec /usr/bin/coreos-cloudinit --from-file /var/run/coreos/$USERDATA_FILE
 {{ end }}
+
+{{ define "instance" -}}
+{ "Fn::Base64": { "Fn::Join" : ["\n", [
+  "#!/bin/bash -xe",
+  "# s3-part-fingerprint: {{ (execTemplate "s3" .) | fingerprint }}",
+  {"Fn::Sub": "echo '{{.StackNameEnvVarName}}=${AWS::StackName}' >>{{.EtcdNodeEnvFileName}}"},
+  {{ (execTemplate "instance-script" .) | toJSON  }}
+]]}}
+{{ end }}
+
 {{ define "s3" -}}
 #cloud-config
 coreos:
   update:
     reboot-strategy: "off"
   units:
+{{if .DisableContainerLinuxAutomaticUpdates}}
+    - name: disable-automatic-update.service
+      command: start
+      content: |
+        [Unit]
+        Description=Disable Container Linux automatic update. Work around to be removed on Ignition migration.
+        [Service]
+        ExecStart=/usr/bin/sh -c 'for u in update-engine locksmithd; do systemctl stop $${u}.service; systemctl mask $${u}.service; systemctl disable $${u}.service; done; systemctl reset-failed'
+{{end}}
 {{- range $u := .Etcd.CustomSystemdUnits}}
     - name: {{$u.Name}}
+      {{- if $u.Command }}
       command: {{ $u.Command }}
+      {{- end}}
       {{- if $u.Enable }}
       enable: {{ $u.Enable }}
       {{- end }}
       {{- if $u.Runtime }}
       runtime: {{ $u.Runtime }}
       {{- end }}
+      {{- if $u.DropInsPresent }}
+      drop-ins:
+        {{- range $d := $u.DropIns }}
+        - name: {{ $d.Name }}
+          content: |
+            {{- range $i := $d.ContentArray }}
+            {{ $i }}
+            {{- end}}
+        {{- end }}
+      {{- end}}
+      {{- if $u.ContentPresent }}
       content: |
         {{- range $l := $u.ContentArray}}
         {{ $l }}
         {{- end }}
+      {{- end}}
 {{- end}}
     - name: cfn-etcd-environment.service
       enable: true
@@ -67,7 +92,6 @@ coreos:
         Restart=on-failure
         RemainAfterExit=true
         ExecStartPre=/opt/bin/cfn-etcd-environment
-        ExecStartPre=/usr/bin/mv -f /var/run/coreos/etcd-environment /etc/etcd-environment
         ExecStart=/bin/true
         TimeoutStartSec=120
 
@@ -115,7 +139,9 @@ coreos:
                   --mount volume=journal,target=/var/log/journal \
                   --volume machine-id,kind=host,source=/etc/machine-id,readOnly=true \
                   --mount volume=machine-id,target=/etc/machine-id \
+                  --uuid-file-save=/var/journald-cloudwatch-logs/journald-cloudwatch-logs.uuid \
                   {{ .JournaldCloudWatchLogsImage.RktRepo }} -- {{.ClusterName}}
+        ExecStopPost=/usr/bin/rkt rm --uuid-file=/var/journald-cloudwatch-logs/journald-cloudwatch-logs.uuid
         Restart=always
         RestartSec=60s
 
@@ -133,6 +159,7 @@ coreos:
         Wants=cfn-etcd-environment.service
         After=cfn-etcd-environment.service
         After=network.target
+        After=var-lib-etcd2.mount
 
         [Service]
         Type=oneshot
@@ -140,6 +167,7 @@ coreos:
         RestartSec=5
         EnvironmentFile=-/etc/etcd-environment
         EnvironmentFile=-/var/run/coreos/etcdadm-environment
+        ExecStartPre=/usr/bin/systemctl is-active var-lib-etcd2.mount
         ExecStartPre=/usr/bin/systemctl is-active cfn-etcd-environment.service
         ExecStartPre=/usr/bin/mkdir -p /var/run/coreos/etcdadm/snapshots
         ExecStart=/opt/bin/etcdadm reconfigure
@@ -147,9 +175,6 @@ coreos:
         ExecStartPost=/usr/bin/systemctl start etcdadm-check.timer
         {{end -}}
         TimeoutStartSec=120
-
-        [Install]
-        WantedBy=cfn-etcd-environment.service
 
     - name: etcdadm-update-status.service
       enable: true
@@ -255,6 +280,7 @@ coreos:
 
             [Service]
             EnvironmentFile=-/etc/etcd-environment
+            EnvironmentFile=-/var/run/coreos/etcdadm/etcd-member.env
 
             PermissionsStartOnly=true
             ExecStartPre=/usr/bin/systemctl is-active cfn-etcd-environment.service
@@ -368,6 +394,19 @@ ssh_authorized_keys:
 {{end}}
 
 write_files:
+  - path: /etc/ssh/sshd_config
+    permissions: 0600
+    owner: root:root
+    content: |
+      UsePrivilegeSeparation sandbox
+      Subsystem sftp internal-sftp
+      ClientAliveInterval 180
+      UseDNS no
+      UsePAM yes
+      PrintLastLog no # handled by PAM
+      PrintMotd no # handled by PAM
+      PasswordAuthentication no
+      ChallengeResponseAuthentication no
 {{- if .Etcd.CustomFiles}}
   {{- range $w := .Etcd.CustomFiles}}
   - path: {{$w.Path}}
@@ -417,7 +456,7 @@ write_files:
     content: |
       #!/bin/bash -vxe
 
-      cfn-init -v -c "etcd-server" --region {{.Region}} --resource {{.Etcd.LogicalName}}${{.EtcdIndexEnvVarName}} --stack ${{.StackNameEnvVarName}}
+      cfn-init -v -c "etcd-server" --region {{.Region}} --resource {{.Etcd.LogicalName}}${{.EtcdIndexEnvVarName}} --stack "${{.StackNameEnvVarName}}"
 
   - path: /opt/bin/attach-etcd-volume
     owner: root:root
@@ -480,14 +519,15 @@ write_files:
         )
 
         if [ "$candidate_vol_id" = "" ]; then
-          echo "[bug] no etcd volume found" 1>&2
-          exit 1
+          echo "no etcd volume found yet, retrying in 10 secs" 1>&2
+          sleep 10
+        else
+          # See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html for device naming
+          if aws ec2 attach-volume --volume-id $candidate_vol_id --instance-id $instance_id --device "/dev/xvdf"; then
+            attached_vol_id=$candidate_vol_id
+          fi
         fi
 
-        # See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html for device naming
-        if aws ec2 attach-volume --volume-id $candidate_vol_id --instance-id $instance_id --device "/dev/xvdf"; then
-          attached_vol_id=$candidate_vol_id
-        fi
       done
 
       # Wait until the volume attachment completes
@@ -715,6 +755,9 @@ write_files:
 
       run append-etcd-server-env
 
+      echo 'moving /var/run/coreos/etcd-environment to /etc/etcd-environment'
+      /usr/bin/mv -f /var/run/coreos/etcd-environment /etc/etcd-environment
+
       /usr/bin/sed -i "s/^ETCDCTL_ENDPOINT.*$/ETCDCTL_ENDPOINT=https:\/\/$(cat /var/run/coreos/advertised-hostname):2379/" /etc/environment
 
   - path: /opt/bin/etcdadm
@@ -763,7 +806,7 @@ write_files:
         {{.AWSCliImage.Options}}{{.AWSCliImage.RktRepo}} --exec=/bin/bash -- \
           -vxec \
           '
-           cfn-signal -e 0 --region {{.Region}} --resource {{.Etcd.LogicalName}}${{.EtcdIndexEnvVarName}} --stack ${{.StackNameEnvVarName}}
+           cfn-signal -e 0 --region {{.Region}} --resource {{.Etcd.LogicalName}}${{.EtcdIndexEnvVarName}} --stack "${{.StackNameEnvVarName}}"
           '
 
       rkt rm --uuid-file=/var/run/coreos/cfn-signal.uuid || :

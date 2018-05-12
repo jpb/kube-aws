@@ -13,9 +13,10 @@ import (
 
 	"errors"
 	"fmt"
-	"github.com/kubernetes-incubator/kube-aws/plugin/pluginmodel"
 	"strings"
 	"testing"
+
+	"github.com/kubernetes-incubator/kube-aws/plugin/pluginmodel"
 )
 
 type dummyEC2CreateVolumeService struct {
@@ -39,9 +40,14 @@ func (svc dummyEC2CreateVolumeService) CreateVolume(input *ec2.CreateVolumeInput
 		)
 	}
 
-	if aws.Int64Value(input.Iops) != aws.Int64Value(expected.Iops) {
+	if (input.Iops == nil && expected.Iops != nil) ||
+		(input.Iops != nil && expected.Iops == nil) ||
+		aws.Int64Value(input.Iops) != aws.Int64Value(expected.Iops) {
 		return nil, fmt.Errorf(
-			"unexpected root volume iops\nexpected=%v, observed=%v",
+			"unexpected root volume iops\n raw values expected=%v, observed=%v \n "+
+				"dereferenced values: expected=%v, observed=%v",
+			expected.Iops,
+			input.Iops,
 			aws.Int64Value(expected.Iops),
 			aws.Int64Value(input.Iops),
 		)
@@ -88,9 +94,15 @@ func (svc dummyEC2DescribeKeyPairsService) DescribeKeyPairs(input *ec2.DescribeK
 
 func TestValidateKeyPair(t *testing.T) {
 	main, err := controlplane.ConfigFromBytes([]byte(`clusterName: test-cluster
-externalDNSName: test-cluster.example.com
+s3URI: s3://mybucket/mydir
+apiEndpoints:
+- name: public
+  dnsName: test-cluster.example.com
+  loadBalancer:
+    hostedZone:
+      id: hostedzone-xxxx
 keyName: mykey
-kmsKeyArn: mykeyarn
+kmsKeyArn: arn:aws:kms:us-west-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx
 region: us-west-1
 availabilityZone: us-west-1a
 `))
@@ -123,9 +135,14 @@ const minimalYaml = `name: pool1
 
 func TestValidateWorkerRootVolume(t *testing.T) {
 	main, err := controlplane.ConfigFromBytes([]byte(`clusterName: test-cluster
-externalDNSName: test-cluster.example.com
+s3URI: s3://mybucket/mydir
+apiEndpoints:
+- name: public
+  dnsName: test-cluster.example.com
+  loadBalancer:
+    recordSetManaged: false
 keyName: mykey
-kmsKeyArn: mykeyarn
+kmsKeyArn: arn:aws:kms:us-west-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx
 region: us-west-1
 availabilityZone: dummy-az-0
 `))
@@ -139,7 +156,6 @@ availabilityZone: dummy-az-0
 	}{
 		{
 			expectedRootVolume: &ec2.CreateVolumeInput{
-				Iops:       aws.Int64(0),
 				Size:       aws.Int64(30),
 				VolumeType: aws.String("gp2"),
 			},
@@ -149,7 +165,6 @@ availabilityZone: dummy-az-0
 		},
 		{
 			expectedRootVolume: &ec2.CreateVolumeInput{
-				Iops:       aws.Int64(0),
 				Size:       aws.Int64(30),
 				VolumeType: aws.String("standard"),
 			},
@@ -160,7 +175,6 @@ rootVolume:
 		},
 		{
 			expectedRootVolume: &ec2.CreateVolumeInput{
-				Iops:       aws.Int64(0),
 				Size:       aws.Int64(50),
 				VolumeType: aws.String("gp2"),
 			},
@@ -172,7 +186,7 @@ rootVolume:
 		},
 		{
 			expectedRootVolume: &ec2.CreateVolumeInput{
-				Iops:       aws.Int64(2000),
+				Iops:       aws.Int64(20000),
 				Size:       aws.Int64(100),
 				VolumeType: aws.String("io1"),
 			},
@@ -180,7 +194,7 @@ rootVolume:
 rootVolume:
   type: io1
   size: 100
-  iops: 2000
+  iops: 20000
 `,
 		},
 	}
@@ -204,11 +218,16 @@ rootVolume:
 
 func TestStackUploadsAndCreation(t *testing.T) {
 	mainConfigBody := `
-externalDNSName: test.staging.core-os.net
+apiEndpoints:
+- name: public
+  dnsName: test.staging.core-os.net
+  loadBalancer:
+    recordSetManaged: false
 keyName: test-key-name
 region: us-west-1
 clusterName: test-cluster-name
-kmsKeyArn: "arn:aws:kms:us-west-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx"
+s3URI: s3://mybucket/mydir
+kmsKeyArn: arn:aws:kms:us-west-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx
 availabilityZone: us-west-1a
 `
 

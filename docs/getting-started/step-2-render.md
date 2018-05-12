@@ -38,9 +38,9 @@ You will use the `KeyMetadata.Arn` string to identify your KMS key in the init s
 
 Select a DNS hostname where the cluster API will be accessible. Typically this hostname is available over the internet ("external"), so end users can connect from different networks. This hostname will be used to provision the TLS certificate for the API server, which encrypts traffic between your users and the API. Optionally, you can provide the certificates yourself, which is recommended for production clusters.
 
-When the cluster is created, the controller will expose the TLS-secured API on a public IP address. You will need to create an A record for the external DNS hostname you want to point to this IP address. You can find the API external IP address after the cluster is created by invoking `kube-aws status`.
+When the cluster is created, the cluster will expose the TLS-secured API on an internet-facing ELB. kube-aws can automatically create an ALIAS record for the ELB in an *existing* [Route 53][route53] hosted zone specified via the `--hosted-zone-id` flag. If you have a DNS zone hosted in Route 53, you can configure for it below.
 
-Alternatively, kube-aws can automatically create this A record in an *existing* [Route 53][route53] hosted zone. If you have a DNS zone hosted in Route 53, you can configure for it below.
+You can also omit `--hosted-zone-id` by specifying the `--no-record-set` flag. However, then, you will need to create an Route53 ALIAS record or a CNAME record for the external DNS hostname you want to point to this ELB. You can find the public DNS name of the ELB after the cluster is created by invoking `kube-aws status`.
 
 ### S3 bucket
 
@@ -80,10 +80,12 @@ Initialize the cluster CloudFormation stack with the KMS Arn, key pair name, and
 $ kube-aws init \
 --cluster-name=my-cluster-name \
 --external-dns-name=my-cluster-endpoint \
+--hosted-zone-id=hosted-zone-xxxxx \
 --region=us-west-1 \
 --availability-zone=us-west-1c \
 --key-name=key-pair-name \
---kms-key-arn="arn:aws:kms:us-west-1:xxxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx"
+--kms-key-arn="arn:aws:kms:us-west-1:xxxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx" \
+--s3-uri=s3://my-kube-aws-assets-bucket
 ```
 
 Here `us-west-1c` is used for parameter `--availability-zone`, but supported availability zone varies among AWS accounts.
@@ -108,6 +110,8 @@ There will now be a `cluster.yaml` file in the asset directory. This is the main
   ```sh
   $ kube-aws render credentials --ca-cert-path=/path/to/ca-cert.pem --ca-key-path=/path/to/ca-key.pem
   ```
+
+  If the CA key is encrypted (which it should), you will be prompted for the key passphrase. Although not recommended, `KUBE_AWS_CA_KEY_PASSPHRASE` environment variable can be set to automate this process.
 
   For more information on operating your own CA, check out this [awesome guide](https://jamielinux.com/docs/openssl-certificate-authority/).
 
@@ -249,11 +253,11 @@ useCalico: true
 
 ### Route53 Host Record
 
-`kube-aws` can optionally create an ALIAS record for the controller's ELB in an existing Route53 hosted zone.
+`kube-aws` can create an ALIAS record for the controller's ELB in an existing Route53 hosted zone.
 
 Just run `kube-aws init` with the flag `--hosted-zone-id` to specify the id of the hosted zone in which the record is created.
 
-If you've run `kube-aws init` without the flag, edit the `cluster.yaml` file to add `loadBalancer.hostedZone.id` under the first item of `apiEndpoints`:
+If you've run `kube-aws init` without the flag but with `--no-record-set`, edit the `cluster.yaml` file to add `loadBalancer.hostedZone.id` under the first item of `apiEndpoints` while setting `recordSetManaged` to `true` or removing it:
 
 ```yaml
 apiEndpoints:
@@ -345,6 +349,7 @@ This includes the certificate authority, signed server certificates for the Kube
   Additionally, the certificate must have the following Subject Alternative Names (SANs).
   These IPs and DNS names are used within the cluster to route from applications to the Kubernetes API:
 
+    - 127.0.0.1
     - 10.0.0.50
     - 10.3.0.1
     - kubernetes
@@ -381,7 +386,7 @@ The `validate` command check the validity of your changes to the cloud-config us
 This is an important step to make sure your stack will launch successfully:
 
 ```sh
-$ kube-aws validate --s3-uri s3://<your-bucket-name>/<prefix>
+$ kube-aws validate
 ```
 
 If your files are valid, you are ready to [launch your cluster][getting-started-step-3].

@@ -17,7 +17,7 @@ type Etcd struct {
 	Nodes              []EtcdNode   `yaml:"nodes,omitempty"`
 	SecurityGroupIds   []string     `yaml:"securityGroupIds"`
 	Snapshot           EtcdSnapshot `yaml:"snapshot,omitempty"`
-	Subnets            []Subnet     `yaml:"subnets,omitempty"`
+	Subnets            Subnets      `yaml:"subnets,omitempty"`
 	UnknownKeys        `yaml:",inline"`
 }
 
@@ -135,7 +135,7 @@ func (e Etcd) SecurityGroupRefs() []string {
 
 	refs = append(
 		refs,
-		`{"Ref":"SecurityGroupEtcd"}`,
+		`{"Fn::ImportValue" : {"Fn::Sub" : "${NetworkStackName}-EtcdSecurityGroup"}}`,
 	)
 
 	return refs
@@ -153,7 +153,7 @@ func (e Etcd) Version() EtcdVersion {
 	if e.Cluster.Version != "" {
 		return e.Cluster.Version
 	}
-	return "3.2.6"
+	return "3.2.13"
 }
 
 func (v EtcdVersion) Is3() bool {

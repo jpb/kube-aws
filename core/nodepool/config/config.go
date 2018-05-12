@@ -1,13 +1,10 @@
 package config
 
-//go:generate go run ../../../codegen/templates_gen.go StackTemplateTemplate=stack-template.json
-//go:generate gofmt -w templates.go
-
 import (
 	"fmt"
 	"strings"
 
-	yaml "gopkg.in/yaml.v2"
+	"github.com/go-yaml/yaml"
 
 	"errors"
 
@@ -16,6 +13,7 @@ import (
 	"github.com/kubernetes-incubator/kube-aws/coreos/amiregistry"
 	"github.com/kubernetes-incubator/kube-aws/model"
 	"github.com/kubernetes-incubator/kube-aws/model/derived"
+	"github.com/kubernetes-incubator/kube-aws/naming"
 )
 
 type Ref struct {
@@ -39,10 +37,12 @@ type ProvidedConfig struct {
 	WorkerNodePoolConfig    `yaml:",inline"`
 	DeploymentSettings      `yaml:",inline"`
 	cfg.Experimental        `yaml:",inline"`
+	cfg.Kubelet             `yaml:",inline"`
 	Plugins                 model.PluginConfigs `yaml:"kubeAwsPlugins,omitempty"`
 	Private                 bool                `yaml:"private,omitempty"`
 	NodePoolName            string              `yaml:"name,omitempty"`
 	ProvidedEncryptService  cfg.EncryptService
+	model.UnknownKeys       `yaml:",inline"`
 }
 
 type DeploymentSettings struct {
@@ -67,7 +67,7 @@ type StackTemplateOptions struct {
 func (c ProvidedConfig) NestedStackName() string {
 	// Convert stack name into something valid as a cfn resource name or
 	// we'll end up with cfn errors like "Template format error: Resource name test5-controlplane is non alphanumeric"
-	return strings.Title(strings.Replace(c.StackName(), "-", "", -1))
+	return naming.FromStackToCfnResource(c.StackName())
 }
 
 func (c ProvidedConfig) StackConfig(opts StackTemplateOptions) (*StackConfig, error) {
@@ -80,8 +80,9 @@ func (c ProvidedConfig) StackConfig(opts StackTemplateOptions) (*StackConfig, er
 		return nil, fmt.Errorf("failed to generate config : %v", err)
 	}
 
+	tlsBootstrappingEnabled := c.Experimental.TLSBootstrap.Enabled
 	if stackConfig.ComputedConfig.AssetsEncryptionEnabled() {
-		compactAssets, err := cfg.ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, cfg.KMSConfig{
+		compactAssets, err := cfg.ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, tlsBootstrappingEnabled, false, cfg.KMSConfig{
 			Region:         stackConfig.ComputedConfig.Region,
 			KMSKeyARN:      c.KMSKeyARN,
 			EncryptService: c.ProvidedEncryptService,
@@ -91,7 +92,7 @@ func (c ProvidedConfig) StackConfig(opts StackTemplateOptions) (*StackConfig, er
 		}
 		stackConfig.ComputedConfig.AssetsConfig = compactAssets
 	} else {
-		rawAssets, _ := cfg.ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates)
+		rawAssets, _ := cfg.ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates, tlsBootstrappingEnabled, false)
 		stackConfig.ComputedConfig.AssetsConfig = rawAssets
 	}
 
@@ -162,6 +163,14 @@ func (c *ProvidedConfig) Load(main *cfg.Config) error {
 	c.KubeClusterSettings = main.KubeClusterSettings
 	c.Experimental.TLSBootstrap = main.DeploymentSettings.Experimental.TLSBootstrap
 	c.Experimental.NodeDrainer = main.DeploymentSettings.Experimental.NodeDrainer
+	c.Experimental.GpuSupport = main.DeploymentSettings.Experimental.GpuSupport
+	c.Kubelet.RotateCerts = main.DeploymentSettings.Kubelet.RotateCerts
+
+	if c.Experimental.ClusterAutoscalerSupport.Enabled {
+		if !main.Addons.ClusterAutoscaler.Enabled {
+			return fmt.Errorf("clusterAutoscalerSupport can't be enabled on node pools when cluster-autoscaler is not going to be deployed to the cluster")
+		}
+	}
 
 	// Validate whole the inputs including inherited ones
 	if err := c.validate(); err != nil {
@@ -190,17 +199,11 @@ define one or more public subnets in cluster.yaml or explicitly reference privat
 		}
 	}
 
-	// Import all the managed subnets from the main cluster i.e. don't create subnets inside the node pool cfn stack
-	for i, s := range c.Subnets {
-		if !s.HasIdentifier() {
-			stackOutputName := fmt.Sprintf(`{"Fn::ImportValue":{"Fn::Sub":"${ControlPlaneStackName}-%s"}}`, s.LogicalName())
-			az := s.AvailabilityZone
-			if s.Private {
-				c.Subnets[i] = model.NewPrivateSubnetFromFn(az, stackOutputName)
-			} else {
-				c.Subnets[i] = model.NewPublicSubnetFromFn(az, stackOutputName)
-			}
-		}
+	// Import all the managed subnets from the network stack i.e. don't create subnets inside the node pool cfn stack
+	var err error
+	c.Subnets, err = c.Subnets.ImportFromNetworkStack()
+	if err != nil {
+		return fmt.Errorf("failed to import subnets from network stack: %v", err)
 	}
 
 	anySubnetIsManaged := false
@@ -283,6 +286,12 @@ func (c ProvidedConfig) FeatureGates() model.FeatureGates {
 	if c.Gpu.Nvidia.IsEnabledOn(c.InstanceType) {
 		gates["Accelerators"] = "true"
 	}
+	if c.Experimental.GpuSupport.Enabled {
+		gates["DevicePlugins"] = "true"
+	}
+	if c.Kubelet.RotateCerts.Enabled {
+		gates["RotateKubeletClientCertificate"] = "true"
+	}
 	return gates
 }
 
@@ -295,7 +304,7 @@ func (c ProvidedConfig) WorkerDeploymentSettings() WorkerDeploymentSettings {
 }
 
 func (c ProvidedConfig) ValidateInputs() error {
-	if err := c.DeploymentSettings.ValidateInputs(); err != nil {
+	if err := c.DeploymentSettings.ValidateInputs(c.NodePoolName); err != nil {
 		return err
 	}
 
@@ -316,11 +325,11 @@ func (c ProvidedConfig) validate() error {
 		return err
 	}
 
-	if err := c.WorkerNodePoolConfig.Validate(); err != nil {
+	if err := c.WorkerNodePoolConfig.Validate(c.Experimental); err != nil {
 		return err
 	}
 
-	if err := c.DeploymentSettings.Validate(); err != nil {
+	if err := c.DeploymentSettings.Validate(c.NodePoolName); err != nil {
 		return err
 	}
 
@@ -328,7 +337,7 @@ func (c ProvidedConfig) validate() error {
 		return err
 	}
 
-	if err := c.Experimental.Validate(); err != nil {
+	if err := c.Experimental.Validate(c.NodePoolName); err != nil {
 		return err
 	}
 
@@ -379,7 +388,7 @@ func (c ProvidedConfig) VPCRef() (string, error) {
 	// When HasIdentifier returns true, it means the VPC already exists, and we can reference it directly by ID
 	if !c.VPC.HasIdentifier() {
 		// Otherwise import the VPC ID from the control-plane stack
-		igw.IDFromStackOutput = `{"Fn::Sub" : "${ControlPlaneStackName}-VPC"}`
+		igw.IDFromStackOutput = `{"Fn::Sub" : "${NetworkStackName}-VPC"}`
 	}
 	return igw.RefOrError(func() (string, error) {
 		return "", fmt.Errorf("[BUG] Tried to reference VPC by its logical name")
@@ -393,7 +402,7 @@ func (c ProvidedConfig) SecurityGroupRefs() []string {
 		refs,
 		// The security group assigned to worker nodes to allow communication to etcd nodes and controller nodes
 		// which is created and maintained in the main cluster and then imported to node pools.
-		`{"Fn::ImportValue" : {"Fn::Sub" : "${ControlPlaneStackName}-WorkerSecurityGroup"}}`,
+		`{"Fn::ImportValue" : {"Fn::Sub" : "${NetworkStackName}-WorkerSecurityGroup"}}`,
 	)
 
 	return refs
